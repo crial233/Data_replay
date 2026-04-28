@@ -8,3 +8,6 @@ CMakeUserPresets.json
 *.dll
 *.o
 *.obj
+*.mp4
+*.log
+can_parser/
