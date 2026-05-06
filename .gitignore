@@ -13,3 +13,4 @@ CMakeUserPresets.json
 can_parser/
 视频文件/
 log文件/
+.codex/

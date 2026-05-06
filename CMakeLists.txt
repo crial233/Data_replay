@@ -23,6 +23,10 @@ set(PROJECT_SOURCES
         can_data_manager.h
         video_player_manager.cpp
         video_player_manager.h
+        replay_clock.cpp
+        replay_clock.h
+        replay_timeline_widget.cpp
+        replay_timeline_widget.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

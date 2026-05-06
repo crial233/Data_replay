@@ -101,6 +101,7 @@ bool CanDataManager::parseCanLogLine(const QString &line, CanFrame &frame, QStri
     QString timestampStr = headerParts[0].trimmed();
     bool ok;
     frame.timeMs = timestampStr.toLongLong(&ok);
+    frame.originalTimeMs = frame.timeMs;
     if (!ok) {
         *error = tr("时间戳解析失败");
         qDebug() << "解析失败 - 时间戳:" << timestampStr;
@@ -295,17 +296,22 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
     QVector<QStringList> rawRows;
     rawRows.reserve(currentUniqueCanIdCount);
     
+    struct SignalDisplay {
+        qint64 timeMs = 0;
+        QString value;
+        QString unit;
+    };
+
     // 同时收集信号解析结果
-    QMap<QString, QPair<QString, QString>> allSignals;
+    QMap<QString, SignalDisplay> allSignals;
     
     for (auto mapIt = latestFrames.begin(); mapIt != latestFrames.end(); ++mapIt) {
         const CanFrame *frame = mapIt.value();
         
         QStringList row;
-        row.reserve(4);
+        row.reserve(3);
+        row << QString::number(frame->originalTimeMs);
         row << QString("0x%1").arg(frame->can_id, 0, 16);
-        row << ((frame->can_id <= 0x7FF) ? QString::fromUtf8("标准帧") : QString::fromUtf8("扩展帧"));
-        row << QString::number(frame->can_dlc);
         
         // 数据十六进制拼接
         QString dataHex;
@@ -321,7 +327,7 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
         QMap<QString, QPair<QString, QString>> frameSignals;
         parseCanSignals(frame->can_id, frame->data, frameSignals);
         for (auto sigIt = frameSignals.begin(); sigIt != frameSignals.end(); ++sigIt) {
-            allSignals[sigIt.key()] = sigIt.value();
+            allSignals[sigIt.key()] = SignalDisplay{frame->timeMs, sigIt.value().first, sigIt.value().second};
         }
     }
     
@@ -332,8 +338,11 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
     signalRows.reserve(allSignals.size());
     for (auto sigIt = allSignals.begin(); sigIt != allSignals.end(); ++sigIt) {
         QStringList row;
-        row.reserve(3);
-        row << sigIt.key() << sigIt.value().first << sigIt.value().second;
+        row.reserve(4);
+        row << formatTime(sigIt.value().timeMs)
+            << sigIt.key()
+            << sigIt.value().value
+            << sigIt.value().unit;
         signalRows.append(row);
     }
     
@@ -373,6 +382,112 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
                  << "ID数:" << currentUniqueCanIdCount
                  << "positionMs:" << positionMs;
     }
+}
+
+QVector<QStringList> CanDataManager::rawFrameRowsAround(qint64 positionMs,
+                                                        qint64 rangeMs,
+                                                        qint64 nextFileThresholdMs)
+{
+    QVector<CanFrame> frames = m_canFrames;
+    if (frames.isEmpty()) {
+        return {};
+    }
+    const qint64 startTimeMs = positionMs - rangeMs;
+    const qint64 endTimeMs = positionMs + rangeMs;
+
+    auto makeRow = [this](const CanFrame &frame) {
+        QString dataHex;
+        dataHex.reserve(frame.data.size() * 3);
+        for (int i = 0; i < frame.data.size() && i < 8; ++i) {
+            if (i > 0) dataHex += ' ';
+            dataHex += QString("%1").arg(static_cast<unsigned char>(frame.data[i]), 2, 16, QChar('0'));
+        }
+
+        QMap<QString, QPair<QString, QString>> parsedSignals;
+        parseCanSignals(frame.can_id, frame.data, parsedSignals);
+        QStringList parsedParts;
+        for (auto sigIt = parsedSignals.begin(); sigIt != parsedSignals.end(); ++sigIt) {
+            parsedParts << QString("%1=%2 %3")
+                .arg(sigIt.key())
+                .arg(sigIt.value().first)
+                .arg(sigIt.value().second);
+        }
+
+        return QStringList{
+            formatTime(frame.timeMs),
+            QString::number(frame.originalTimeMs),
+            QString("0x%1").arg(frame.can_id, 0, 16),
+            dataHex,
+            parsedParts.join("; ")
+        };
+    };
+
+    auto lowerIt = std::lower_bound(frames.cbegin(), frames.cend(), startTimeMs,
+                                    [](const CanFrame &frame, qint64 position) {
+                                        return frame.timeMs < position;
+                                    });
+    if (frames.last().timeMs < endTimeMs && m_currentCanLogIndex + 1 < m_canLogFileList.size()) {
+        const QString nextLogFile = m_canLogFileList[m_currentCanLogIndex + 1];
+        bool ok = false;
+        const qint64 nextFileTimestamp = QFileInfo(nextLogFile).baseName().toLongLong(&ok);
+        const qint64 lastLoadedOriginal = frames.last().originalTimeMs;
+
+        if (ok && nextFileTimestamp >= lastLoadedOriginal &&
+            nextFileTimestamp - lastLoadedOriginal <= nextFileThresholdMs) {
+            QFile file(nextLogFile);
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&file);
+                const qint64 startOriginalTime = m_baseTimestampMs + startTimeMs;
+                const qint64 endOriginalTime = m_baseTimestampMs + endTimeMs;
+
+                while (!in.atEnd()) {
+                    const QString line = in.readLine().trimmed();
+                    if (line.isEmpty()) {
+                        continue;
+                    }
+
+                    const int commaPos = line.indexOf(',');
+                    if (commaPos < 0) {
+                        continue;
+                    }
+
+                    bool lineOk = false;
+                    const qint64 lineTimestamp = line.left(commaPos).trimmed().toLongLong(&lineOk);
+                    if (!lineOk || lineTimestamp < startOriginalTime) {
+                        continue;
+                    }
+                    if (lineTimestamp > endOriginalTime) {
+                        break;
+                    }
+
+                    CanFrame frame;
+                    QString lineError;
+                    if (parseCanLogLine(line, frame, &lineError)) {
+                        frame.timeMs = frame.timeMs - m_baseTimestampMs;
+                        frames.append(frame);
+                    }
+                }
+            }
+        }
+    }
+
+    lowerIt = std::lower_bound(frames.cbegin(), frames.cend(), startTimeMs,
+                               [](const CanFrame &frame, qint64 position) {
+                                   return frame.timeMs < position;
+                               });
+
+    auto endIt = std::upper_bound(frames.cbegin(), frames.cend(), endTimeMs,
+                                  [](qint64 position, const CanFrame &frame) {
+                                      return position < frame.timeMs;
+                                  });
+
+    QVector<QStringList> rows;
+    rows.reserve(std::distance(lowerIt, endIt));
+    for (auto it = lowerIt; it != endIt; ++it) {
+        rows.append(makeRow(*it));
+    }
+
+    return rows;
 }
 
 // ===== CAN缓存清除 =====
@@ -447,17 +562,19 @@ bool CanDataManager::loadCanLogByTimestamp(qint64 timestamp, qint64 targetPositi
         return false;
     }
     
-    // 找到最接近（小于等于）该时间戳的log文件
+    const qint64 absoluteTarget = timestamp + targetPositionMs;
+
+    // 找到最接近（小于等于）目标绝对时间的log文件
     int bestIndex = -1;
     qint64 bestDiff = -1;
     
     for (int i = 0; i < m_canLogFileList.size(); ++i) {
         qint64 logTimestamp = QFileInfo(m_canLogFileList[i]).baseName().toLongLong();
         
-        if (logTimestamp <= timestamp) {
-            if (bestIndex == -1 || (timestamp - logTimestamp) < bestDiff) {
+        if (logTimestamp <= absoluteTarget) {
+            if (bestIndex == -1 || (absoluteTarget - logTimestamp) < bestDiff) {
                 bestIndex = i;
-                bestDiff = timestamp - logTimestamp;
+                bestDiff = absoluteTarget - logTimestamp;
             }
         }
     }
@@ -476,7 +593,6 @@ bool CanDataManager::loadCanLogByTimestamp(qint64 timestamp, qint64 targetPositi
     m_isLoadingCanData = true;
     
     // 计算预加载范围
-    qint64 absoluteTarget = timestamp + targetPositionMs;
     qint64 preloadStart = absoluteTarget - 5000;
     qint64 preloadEnd = absoluteTarget + 60000;
     
@@ -506,7 +622,7 @@ bool CanDataManager::loadCanLogByTimestamp(qint64 timestamp, qint64 targetPositi
                 CanFrame frame;
                 QString lineError;
                 if (parseCanLogLine(line, frame, &lineError)) {
-                    frame.timeMs = frame.timeMs - timestamp;
+                    frame.timeMs = frame.timeMs - m_baseTimestampMs;
                     frames.append(frame);
                 }
             }

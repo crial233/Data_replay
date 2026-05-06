@@ -40,6 +40,8 @@ public:
     ViewMode viewMode() const { return m_viewMode; }
     int activeChannel() const { return m_activeChannel; }
     void setActiveChannel(int ch) { m_activeChannel = ch; }
+    int channelForTimestamp(qint64 timestamp) const;
+    void showSingleChannel(int channel);
 
     // 视频文件夹路径
     void setVideoFolderPath(const QString &path);
@@ -56,8 +58,14 @@ public:
 
     // 播放控制
     void togglePlayback();
+    void playAll();
+    void pauseAll();
     void setPlaybackRate(qreal rate);
     void seekAllPlayers(qint64 positionMs);
+    void syncPlayersToPosition(qint64 positionMs, qint64 thresholdMs);
+    void syncPlayersToTimestamp(qint64 currentTimestampMs, qint64 thresholdMs, bool playing);
+    qint64 sessionDurationMs(qint64 baseTimestampMs) const;
+    QVector<QPair<qint64, qint64>> availabilityRangesForDate(const QDate &date) const;
 
     // 更新视频网格布局
     void updateVideoGrid();
@@ -73,6 +81,7 @@ public:
 
     // 获取通道容器（用于eventFilter）
     QWidget *channelContainer(int channel) const { return m_channelContainers[channel]; }
+    QWidget *videoWidget(int channel) const { return m_videoWidgets[channel]; }
 
     // 获取视频文件列表（判断是否有视频）
     bool hasVideo(int channel) const { return !m_videoFileLists[channel].isEmpty(); }
@@ -111,9 +120,18 @@ private:
     // 视频文件夹
     QString m_videoFolderPath;
     QVector<QString> m_videoFileLists[MAX_CHANNELS];
+    qint64 m_channelStartTimestamps[MAX_CHANNELS] = {};
+
+    // 每个显示格子对应的视频通道。右键切换只改变当前格子映射，不改变整体视图模式。
+    int m_displayChannels[MAX_CHANNELS] = {0, 1, 2, 3, 4, 5, 6, 7};
 
     // 日期转时间戳工具
     static qint64 timestampFromDate(const QDate &date);
+    int displaySlotForChannel(int channel) const;
+    void setDisplaySlotChannel(int slot, int channel);
+    void setChannelVideoVisible(int channel, bool visible);
+    void setChannelHint(int channel, const QString &detail = QString());
+    void setChannelOverlayVisible(int channel, bool visible);
 };
 
 #endif // VIDEO_PLAYER_MANAGER_H

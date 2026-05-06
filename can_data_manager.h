@@ -16,6 +16,7 @@ class SimpleTableModel;
 
 // CAN数据帧结构
 struct CanFrame {
+    qint64 originalTimeMs = 0;  // CAN log original absolute timestamp
     qint64 timeMs = 0;          // 时间戳（毫秒）
     quint32 can_id = 0;         // CAN ID（无符号32位）
     quint8 can_dlc = 0;         // 数据长度
@@ -45,6 +46,9 @@ public:
 
     // CAN显示更新
     void updateCanDisplay(qint64 positionMs);
+    QVector<QStringList> rawFrameRowsAround(qint64 positionMs,
+                                            qint64 rangeMs = 500,
+                                            qint64 nextFileThresholdMs = 5000);
 
     // CAN缓存清除
     void clearCanCache();
