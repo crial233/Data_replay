@@ -17,6 +17,12 @@ set(PROJECT_SOURCES
         mainwindow.cpp
         mainwindow.h
         mainwindow.ui
+        simple_table_model.cpp
+        simple_table_model.h
+        can_data_manager.cpp
+        can_data_manager.h
+        video_player_manager.cpp
+        video_player_manager.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

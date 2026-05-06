@@ -11,3 +11,5 @@ CMakeUserPresets.json
 *.mp4
 *.log
 can_parser/
+视频文件/
+log文件/
