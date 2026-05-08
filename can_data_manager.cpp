@@ -339,7 +339,7 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
     for (auto sigIt = allSignals.begin(); sigIt != allSignals.end(); ++sigIt) {
         QStringList row;
         row.reserve(4);
-        row << formatTime(sigIt.value().timeMs)
+        row << formatDateTime(m_baseTimestampMs + sigIt.value().timeMs)
             << sigIt.key()
             << sigIt.value().value
             << sigIt.value().unit;
@@ -357,7 +357,9 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
     // 状态信息
     if (!latestFrames.isEmpty()) {
         const CanFrame &lastFrame = *latestFrames.last();
-        qint64 originalAbsoluteTimestamp = lastFrame.timeMs + m_baseTimestampMs;
+        qint64 originalAbsoluteTimestamp = lastFrame.originalTimeMs > 0
+            ? lastFrame.originalTimeMs
+            : lastFrame.timeMs + m_baseTimestampMs;
         
         QString logInfo;
         if (m_currentCanLogIndex >= 0 && m_currentCanLogIndex < m_canLogFileList.size()) {
@@ -366,9 +368,8 @@ void CanDataManager::updateCanDisplay(qint64 positionMs)
                 .arg(m_canLogFileList.size());
         }
         
-        emit statusMessage(tr("CAN 帧数：%1 | 最后更新：%2 (绝对: %3)%4")
+        emit statusMessage(tr("CAN 帧数: %1 | 最后更新: %2%3")
             .arg(latestFrames.size())
-            .arg(formatTime(lastFrame.timeMs))
             .arg(originalAbsoluteTimestamp)
             .arg(logInfo));
     }
@@ -414,7 +415,7 @@ QVector<QStringList> CanDataManager::rawFrameRowsAround(qint64 positionMs,
         }
 
         return QStringList{
-            formatTime(frame.timeMs),
+            formatDateTime(m_baseTimestampMs + frame.timeMs),
             QString::number(frame.originalTimeMs),
             QString("0x%1").arg(frame.can_id, 0, 16),
             dataHex,
@@ -807,5 +808,5 @@ QString CanDataManager::formatTime(qint64 ms)
 QString CanDataManager::formatDateTime(qint64 timestampMs)
 {
     QDateTime dateTime = QDateTime::fromMSecsSinceEpoch(timestampMs);
-    return dateTime.toString("yy/MM/dd HH:mm:ss.zzz");
+    return dateTime.toString("yy/MM/dd | HH:mm:ss.zzz");
 }

@@ -184,7 +184,7 @@ void MainWindow::buildUi()
     m_canTable->setModel(m_canTableModel);
     m_canTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_canTable->horizontalHeader()->setStretchLastSection(false);
-    m_canTable->setColumnWidth(0, 150);
+    m_canTable->setColumnWidth(0, 180);
     m_canTable->setColumnWidth(1, 150);
     m_canTable->setColumnWidth(2, 130);
     m_canTable->setColumnWidth(3, 60);
@@ -505,7 +505,7 @@ void MainWindow::updatePosition(qint64 positionMs)
         qint64 currentTimestamp = m_baseTimestampMs + positionMs;
         m_timeLabel->setText(QString("%1 / 24:00:00.000")
             .arg(CanDataManager::formatTime(positionMs)));
-        m_timestampLabel->setText(QDateTime::fromMSecsSinceEpoch(currentTimestamp).toString("yy/MM/dd/HH/mm/ss:zzz"));
+        m_timestampLabel->setText(CanDataManager::formatDateTime(currentTimestamp));
     } else {
         m_timeLabel->setText(CanDataManager::formatTime(positionMs) + " / 24:00:00.000");
         m_timestampLabel->setText(tr("时间戳: --"));
@@ -597,7 +597,7 @@ void MainWindow::showRawCanFramesDialog()
     m_rawCanFramesTable->setModel(m_rawCanFramesModel);
     m_rawCanFramesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
     m_rawCanFramesTable->horizontalHeader()->setStretchLastSection(false);
-    m_rawCanFramesTable->setColumnWidth(0, 120);
+    m_rawCanFramesTable->setColumnWidth(0, 180);
     m_rawCanFramesTable->setColumnWidth(1, 160);
     m_rawCanFramesTable->setColumnWidth(2, 90);
     m_rawCanFramesTable->setColumnWidth(3, 240);
@@ -612,7 +612,8 @@ void MainWindow::showRawCanFramesDialog()
         if (!index.isValid() || !m_rawCanFramesModel) {
             return;
         }
-        const QString parsedTime = m_rawCanFramesModel->data(m_rawCanFramesModel->index(index.row(), 0)).toString();
+        const QString parsedDateTime = m_rawCanFramesModel->data(m_rawCanFramesModel->index(index.row(), 0)).toString();
+        const QString parsedTime = parsedDateTime.section('|', 1).trimmed();
         const QTime parsed = QTime::fromString(parsedTime, "HH:mm:ss.zzz");
         if (!parsed.isValid()) {
             return;
@@ -641,7 +642,7 @@ void MainWindow::refreshRawCanFramesDialog(qint64 positionMs)
         if (row.size() < 2) {
             continue;
         }
-        const QTime parsed = QTime::fromString(row[0], "HH:mm:ss.zzz");
+        const QTime parsed = QTime::fromString(row[0].section('|', 1).trimmed(), "HH:mm:ss.zzz");
         if (!parsed.isValid()) {
             continue;
         }
@@ -655,7 +656,7 @@ void MainWindow::refreshRawCanFramesDialog(qint64 positionMs)
 
     m_rawCanFramesModel->setRows(std::move(rows));
     m_rawCanFramesInfoLabel->setText(tr("解析时间戳: %1 | 原始时间戳: %2 | 显示前后500ms内原始帧%3")
-        .arg(CanDataManager::formatTime(positionMs))
+        .arg(CanDataManager::formatDateTime(m_baseTimestampMs + positionMs))
         .arg(currentOriginalTimestamp)
         .arg(m_rawCanFramesModel->rowCount() == 0 ? tr(" | 无 CAN 原始帧") : QString()));
 }
