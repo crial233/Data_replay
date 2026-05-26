@@ -127,6 +127,7 @@ private:
 
     // 日期转时间戳工具
     static qint64 timestampFromDate(const QDate &date);
+    static qint64 timestampFromVideoFileName(const QString &baseName, bool *ok = nullptr);
     int displaySlotForChannel(int channel) const;
     void setDisplaySlotChannel(int slot, int channel);
     void setChannelVideoVisible(int channel, bool visible);

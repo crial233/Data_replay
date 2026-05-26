@@ -96,7 +96,7 @@ int VideoPlayerManager::channelForTimestamp(qint64 timestamp) const
     for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
         for (const auto &path : m_videoFileLists[ch]) {
             bool ok = false;
-            const qint64 fileTimestamp = QFileInfo(path).baseName().toLongLong(&ok);
+            const qint64 fileTimestamp = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
             if (ok && fileTimestamp == timestamp) {
                 return ch;
             }
@@ -398,7 +398,7 @@ QVector<QPair<qint64, qint64>> VideoPlayerManager::availabilityRangesForDate(con
     for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
         for (const auto &path : m_videoFileLists[ch]) {
             bool ok = false;
-            const qint64 ts = QFileInfo(path).baseName().toLongLong(&ok);
+            const qint64 ts = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
             if (!ok) {
                 continue;
             }
@@ -440,6 +440,24 @@ qint64 VideoPlayerManager::timestampFromDate(const QDate &date)
     return dateTime.toMSecsSinceEpoch();
 }
 
+qint64 VideoPlayerManager::timestampFromVideoFileName(const QString &baseName, bool *ok)
+{
+    bool parsed = false;
+    qint64 timestamp = baseName.toLongLong(&parsed);
+    if (!parsed) {
+        const QDateTime dateTime = QDateTime::fromString(baseName, "yyyy-MM-dd_HH-mm-ss-zzz");
+        parsed = dateTime.isValid();
+        if (parsed) {
+            timestamp = dateTime.toMSecsSinceEpoch();
+        }
+    }
+
+    if (ok) {
+        *ok = parsed;
+    }
+    return parsed ? timestamp : 0;
+}
+
 void VideoPlayerManager::loadAllChannels(const QDate &date)
 {
     for (int i = 0; i < MAX_CHANNELS; i++) {
@@ -473,8 +491,8 @@ void VideoPlayerManager::loadAllChannels(const QDate &date)
         
         for (const auto &file : fileList) {
             QString baseName = file.baseName();
-            bool ok;
-            qint64 timestamp = baseName.toLongLong(&ok);
+            bool ok = false;
+            qint64 timestamp = timestampFromVideoFileName(baseName, &ok);
             
             if (ok && timestamp >= dayStart && timestamp < dayEnd) {
                 m_videoFileLists[ch].append(file.absoluteFilePath());
@@ -489,7 +507,11 @@ void VideoPlayerManager::loadAllChannels(const QDate &date)
     QSet<qint64> uniqueTimestamps;
     for (int ch = 0; ch < MAX_CHANNELS; ch++) {
         for (const auto &path : m_videoFileLists[ch]) {
-            uniqueTimestamps.insert(QFileInfo(path).baseName().toLongLong());
+            bool ok = false;
+            const qint64 timestamp = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
+            if (ok) {
+                uniqueTimestamps.insert(timestamp);
+            }
         }
     }
     QList<qint64> sortedTimestamps = uniqueTimestamps.values();
@@ -501,7 +523,9 @@ void VideoPlayerManager::loadAllChannels(const QDate &date)
             QStringList channels;
             for (int ch = 0; ch < MAX_CHANNELS; ch++) {
                 for (const auto &path : m_videoFileLists[ch]) {
-                    if (QFileInfo(path).baseName().toLongLong() == ts) {
+                    bool ok = false;
+                    const qint64 fileTimestamp = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
+                    if (ok && fileTimestamp == ts) {
                         channels << QString("CH%1").arg(ch);
                         break;
                     }
@@ -538,7 +562,11 @@ void VideoPlayerManager::playAllChannels(qint64 timestamp)
         qint64 bestDiff = -1;
         
         for (const auto &path : m_videoFileLists[ch]) {
-            qint64 ts = QFileInfo(path).baseName().toLongLong();
+            bool ok = false;
+            qint64 ts = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
+            if (!ok) {
+                continue;
+            }
             qint64 diff = qAbs(ts - timestamp);
             if (bestDiff < 0 || diff < bestDiff) {
                 bestDiff = diff;
