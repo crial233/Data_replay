@@ -13,12 +13,16 @@
 #include <QDateTime>
 #include <QSizePolicy>
 #include <QVBoxLayout>
+#include <QFutureWatcher>
+#include <QSignalBlocker>
+#include <QtConcurrent/QtConcurrentRun>
 
 #include <algorithm>
 
 VideoPlayerManager::VideoPlayerManager(QObject *parent)
     : QObject(parent)
 {
+    m_driftCorrectionTimer.start();
 }
 
 VideoPlayerManager::~VideoPlayerManager()
@@ -62,8 +66,7 @@ void VideoPlayerManager::createPlayers(QWidget *parentWidget)
         m_channelLabels[i]->hide();
         setChannelHint(i);
     }
-    // 通道0有声音
-    m_audioOutputs[0]->setVolume(50);
+    // 视频内嵌音轨保持静音，声音由单路音频播放器输出。
 }
 
 void VideoPlayerManager::setVideoGridWidget(QWidget *gridWidget)
@@ -93,14 +96,9 @@ void VideoPlayerManager::setViewMode(ViewMode mode)
 
 int VideoPlayerManager::channelForTimestamp(qint64 timestamp) const
 {
+    const quint8 channelMask = m_channelsByTimestamp.value(timestamp, 0);
     for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
-        for (const auto &path : m_videoFileLists[ch]) {
-            bool ok = false;
-            const qint64 fileTimestamp = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
-            if (ok && fileTimestamp == timestamp) {
-                return ch;
-            }
-        }
+        if (channelMask & (quint8(1) << ch)) return ch;
     }
     return -1;
 }
@@ -124,6 +122,7 @@ void VideoPlayerManager::showSingleChannel(int channel)
 
 void VideoPlayerManager::updateVideoGrid()
 {
+    m_forceDriftCorrection = true;
     // 隐藏所有视频容器
     for (int i = 0; i < MAX_CHANNELS; i++) {
         m_channelContainers[i]->hide();
@@ -230,7 +229,19 @@ void VideoPlayerManager::setChannelVideoVisible(int channel, bool visible)
         return;
     }
 
-    m_videoWidgets[channel]->setVisible(visible);
+    if (m_videoWidgets[channel]->isVisible() != visible) {
+        m_videoWidgets[channel]->setVisible(visible);
+    }
+}
+
+bool VideoPlayerManager::isChannelDisplayed(int channel) const
+{
+    if (m_viewMode == View1) return channel == m_activeChannel;
+    const int slotCount = (m_viewMode == View8) ? MAX_CHANNELS : 4;
+    for (int slot = 0; slot < slotCount; ++slot) {
+        if (m_displayChannels[slot] == channel) return true;
+    }
+    return false;
 }
 
 void VideoPlayerManager::setChannelHint(int channel, const QString &detail)
@@ -292,7 +303,8 @@ void VideoPlayerManager::togglePlayback()
 void VideoPlayerManager::playAll()
 {
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (m_channelStartTimestamps[i] > 0) {
+        if (m_channelStartTimestamps[i] > 0 && isChannelDisplayed(i) &&
+            m_players[i]->playbackState() != QMediaPlayer::PlayingState) {
             m_players[i]->play();
         }
     }
@@ -301,7 +313,9 @@ void VideoPlayerManager::playAll()
 void VideoPlayerManager::pauseAll()
 {
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        m_players[i]->pause();
+        if (m_players[i]->playbackState() != QMediaPlayer::PausedState) {
+            m_players[i]->pause();
+        }
     }
 }
 
@@ -322,7 +336,7 @@ void VideoPlayerManager::seekAllPlayers(qint64 positionMs)
 void VideoPlayerManager::syncPlayersToPosition(qint64 positionMs, qint64 thresholdMs)
 {
     for (int i = 0; i < MAX_CHANNELS; i++) {
-        if (m_videoFileLists[i].isEmpty()) {
+        if (m_channelVideos[i].isEmpty()) {
             continue;
         }
 
@@ -334,43 +348,95 @@ void VideoPlayerManager::syncPlayersToPosition(qint64 positionMs, qint64 thresho
 
 void VideoPlayerManager::syncPlayersToTimestamp(qint64 currentTimestampMs, qint64 thresholdMs, bool playing)
 {
+    // Seeking several HEVC streams is expensive. During normal playback, correct
+    // drift at most once per second instead of on every 50 ms UI clock tick.
+    const bool forceSeek = thresholdMs <= 0 || !playing;
+    const bool correctionDue = forceSeek || m_forceDriftCorrection ||
+                               m_driftCorrectionTimer.elapsed() >= 1000;
+    const qint64 effectiveThresholdMs = forceSeek ? thresholdMs : qMax<qint64>(500, thresholdMs);
+    if (correctionDue) {
+        m_driftCorrectionTimer.restart();
+        m_forceDriftCorrection = false;
+    }
+
     for (int i = 0; i < MAX_CHANNELS; i++) {
+        if (isChannelDisplayed(i)) {
+            selectVideoForTimestamp(i, currentTimestampMs);
+        }
         if (m_channelStartTimestamps[i] <= 0) {
             setChannelVideoVisible(i, false);
             continue;
         }
 
+        if (!isChannelDisplayed(i)) {
+            if (m_players[i]->playbackState() == QMediaPlayer::PlayingState) {
+                m_players[i]->pause();
+            }
+            continue;
+        }
+
         const qint64 desiredPositionMs = currentTimestampMs - m_channelStartTimestamps[i];
         if (desiredPositionMs < 0) {
-            if (m_players[i]->position() != 0) {
+            if (correctionDue && m_players[i]->position() != 0) {
                 m_players[i]->setPosition(0);
             }
-            m_players[i]->pause();
+            if (m_players[i]->playbackState() != QMediaPlayer::PausedState) m_players[i]->pause();
             setChannelVideoVisible(i, false);
             continue;
         }
 
         const qint64 durationMs = m_players[i]->duration();
         if (durationMs > 0 && desiredPositionMs > durationMs) {
-            if (qAbs(m_players[i]->position() - durationMs) > thresholdMs) {
+            if (correctionDue && qAbs(m_players[i]->position() - durationMs) > effectiveThresholdMs) {
                 m_players[i]->setPosition(durationMs);
             }
-            m_players[i]->pause();
+            if (m_players[i]->playbackState() != QMediaPlayer::PausedState) m_players[i]->pause();
             setChannelVideoVisible(i, false);
             continue;
         }
 
         setChannelVideoVisible(i, true);
-        if (qAbs(m_players[i]->position() - desiredPositionMs) > thresholdMs) {
+        if (correctionDue && qAbs(m_players[i]->position() - desiredPositionMs) > effectiveThresholdMs) {
             m_players[i]->setPosition(desiredPositionMs);
         }
 
         if (playing) {
-            m_players[i]->play();
+            if (m_players[i]->playbackState() != QMediaPlayer::PlayingState) m_players[i]->play();
         } else {
-            m_players[i]->pause();
+            if (m_players[i]->playbackState() != QMediaPlayer::PausedState) m_players[i]->pause();
         }
     }
+}
+
+bool VideoPlayerManager::selectVideoForTimestamp(int channel, qint64 timestamp)
+{
+    const auto &videos = m_channelVideos[channel];
+    const auto upper = std::upper_bound(videos.cbegin(), videos.cend(), timestamp,
+                                        [](qint64 ts, const VideoEntry &video) {
+        return ts < video.timestamp;
+    });
+    const int index = (upper == videos.cbegin())
+        ? -1
+        : static_cast<int>(std::distance(videos.cbegin(), upper) - 1);
+
+    if (index == m_currentVideoIndices[channel]) return index >= 0;
+
+    m_currentVideoIndices[channel] = index;
+    if (index < 0) {
+        m_channelStartTimestamps[channel] = 0;
+        m_players[channel]->stop();
+        setChannelVideoVisible(channel, false);
+        setChannelHint(channel, tr("等待视频"));
+        return false;
+    }
+
+    const VideoEntry &video = videos[index];
+    m_channelStartTimestamps[channel] = video.timestamp;
+    m_players[channel]->setSource(QUrl::fromLocalFile(video.path));
+    m_players[channel]->setPosition(qMax<qint64>(0, timestamp - video.timestamp));
+    setChannelHint(channel, QFileInfo(video.path).fileName());
+    m_forceDriftCorrection = true;
+    return true;
 }
 
 qint64 VideoPlayerManager::sessionDurationMs(qint64 baseTimestampMs) const
@@ -396,14 +462,8 @@ QVector<QPair<qint64, qint64>> VideoPlayerManager::availabilityRangesForDate(con
     const qint64 dayStart = timestampFromDate(date);
     QVector<QPair<qint64, qint64>> ranges;
     for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
-        for (const auto &path : m_videoFileLists[ch]) {
-            bool ok = false;
-            const qint64 ts = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
-            if (!ok) {
-                continue;
-            }
-
-            const qint64 start = ts - dayStart;
+        for (const auto &video : m_channelVideos[ch]) {
+            const qint64 start = video.timestamp - dayStart;
             if (start < 0 || start >= DAY_MS) {
                 continue;
             }
@@ -460,28 +520,50 @@ qint64 VideoPlayerManager::timestampFromVideoFileName(const QString &baseName, b
 
 void VideoPlayerManager::loadAllChannels(const QDate &date)
 {
+    const quint64 generation = ++m_scanGeneration;
     for (int i = 0; i < MAX_CHANNELS; i++) {
         m_players[i]->stop();
         setChannelVideoVisible(i, false);
-        m_videoFileLists[i].clear();
+        m_channelVideos[i].clear();
         m_channelStartTimestamps[i] = 0;
+        m_currentVideoIndices[i] = -1;
     }
+    m_channelsByTimestamp.clear();
     emit canCacheClearRequested();
-    
+
     if (m_videoListWidget) m_videoListWidget->clear();
-    
-    if (m_videoFolderPath.isEmpty()) return;
-    
+
+    if (m_videoFolderPath.isEmpty()) {
+        emit videoListLoaded(false);
+        return;
+    }
+
+    const QString folderPath = m_videoFolderPath;
+    emit statusMessage(tr("正在扫描 %1 的视频...").arg(date.toString("yyyy-MM-dd")));
+    auto *watcher = new QFutureWatcher<ScanResult>(this);
+    connect(watcher, &QFutureWatcher<ScanResult>::finished, this,
+            [this, watcher, date, generation]() {
+        const ScanResult result = watcher->result();
+        watcher->deleteLater();
+        applyScanResult(result, date, generation);
+    });
+    watcher->setFuture(QtConcurrent::run([folderPath, date]() {
+        return scanVideoFolder(folderPath, date);
+    }));
+}
+
+VideoPlayerManager::ScanResult VideoPlayerManager::scanVideoFolder(
+    const QString &folderPath, const QDate &date)
+{
+    ScanResult result;
+
     qint64 dayStart = timestampFromDate(date);
     qint64 dayEnd = dayStart + 24 * 60 * 60 * 1000;
     QStringList filters;
     filters << "*.mp4" << "*.avi" << "*.mkv" << "*.mov" << "*.wmv";
     
-    int totalVideos = 0;
-    int activeChannels = 0;
-    
     for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-        QString channelDir = QString("%1/video%2").arg(m_videoFolderPath).arg(ch);
+        QString channelDir = QString("%1/video%2").arg(folderPath).arg(ch);
         QDir dir(channelDir);
         
         if (!dir.exists()) continue;
@@ -495,41 +577,43 @@ void VideoPlayerManager::loadAllChannels(const QDate &date)
             qint64 timestamp = timestampFromVideoFileName(baseName, &ok);
             
             if (ok && timestamp >= dayStart && timestamp < dayEnd) {
-                m_videoFileLists[ch].append(file.absoluteFilePath());
-                totalVideos++;
+                result.channels[ch].append({timestamp, file.absoluteFilePath(), ch});
+                result.channelsByTimestamp[timestamp] |= (quint8(1) << ch);
+                result.totalVideos++;
                 chHasVideo = true;
             }
         }
-        if (chHasVideo) activeChannels++;
+        std::sort(result.channels[ch].begin(), result.channels[ch].end(),
+                  [](const VideoEntry &a, const VideoEntry &b) {
+            return a.timestamp < b.timestamp;
+        });
+        if (chHasVideo) result.activeChannels++;
     }
-    
-    // 收集所有唯一时间戳并排序，填充到视频列表
-    QSet<qint64> uniqueTimestamps;
-    for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-        for (const auto &path : m_videoFileLists[ch]) {
-            bool ok = false;
-            const qint64 timestamp = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
-            if (ok) {
-                uniqueTimestamps.insert(timestamp);
-            }
-        }
+    return result;
+}
+
+void VideoPlayerManager::applyScanResult(
+    const ScanResult &result, const QDate &date, quint64 generation)
+{
+    if (generation != m_scanGeneration) return;
+
+    for (int ch = 0; ch < MAX_CHANNELS; ++ch) {
+        m_channelVideos[ch] = result.channels[ch];
     }
-    QList<qint64> sortedTimestamps = uniqueTimestamps.values();
+    m_channelsByTimestamp = result.channelsByTimestamp;
+
+    QList<qint64> sortedTimestamps = m_channelsByTimestamp.keys();
     std::sort(sortedTimestamps.begin(), sortedTimestamps.end());
-    
+
     if (m_videoListWidget) {
+        const QSignalBlocker blocker(m_videoListWidget);
+        m_videoListWidget->setUpdatesEnabled(false);
         for (qint64 ts : sortedTimestamps) {
             QDateTime dateTime = QDateTime::fromMSecsSinceEpoch(ts);
             QStringList channels;
+            const quint8 channelMask = m_channelsByTimestamp.value(ts);
             for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-                for (const auto &path : m_videoFileLists[ch]) {
-                    bool ok = false;
-                    const qint64 fileTimestamp = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
-                    if (ok && fileTimestamp == ts) {
-                        channels << QString("CH%1").arg(ch);
-                        break;
-                    }
-                }
+                if (channelMask & (quint8(1) << ch)) channels << QString("CH%1").arg(ch);
             }
             QString displayText = QString("%1  %2")
                 .arg(dateTime.toString("HH:mm:ss"))
@@ -537,67 +621,25 @@ void VideoPlayerManager::loadAllChannels(const QDate &date)
             auto *item = new QListWidgetItem(displayText, m_videoListWidget);
             item->setData(Qt::UserRole, ts);
         }
+        m_videoListWidget->setUpdatesEnabled(true);
     }
-    
-    if (totalVideos > 0) {
-        if (m_videoListWidget && m_videoListWidget->count() > 0) {
-            m_videoListWidget->setCurrentRow(0);
-        }
-        emit statusMessage(tr("找到 %1 个视频文件(跨 %2 通道)").arg(totalVideos).arg(activeChannels));
+
+    if (result.totalVideos > 0) {
+        emit statusMessage(tr("找到 %1 个视频文件(跨 %2 通道)")
+                           .arg(result.totalVideos).arg(result.activeChannels));
     } else {
         if (m_videoListWidget) {
             m_videoListWidget->addItem(tr("该日期没有视频文件"));
         }
         emit statusMessage(tr("%1 没有找到视频文件").arg(date.toString("yyyy-MM-dd")));
     }
+    emit videoListLoaded(result.totalVideos > 0);
 }
 
 void VideoPlayerManager::playAllChannels(qint64 timestamp)
 {
     emit canCacheClearRequested();
-    
-    for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-        QString bestFile;
-        qint64 bestTimestamp = 0;
-        qint64 bestDiff = -1;
-        
-        for (const auto &path : m_videoFileLists[ch]) {
-            bool ok = false;
-            qint64 ts = timestampFromVideoFileName(QFileInfo(path).baseName(), &ok);
-            if (!ok) {
-                continue;
-            }
-            qint64 diff = qAbs(ts - timestamp);
-            if (bestDiff < 0 || diff < bestDiff) {
-                bestDiff = diff;
-                bestFile = path;
-                bestTimestamp = ts;
-            }
-        }
-        
-        if (!bestFile.isEmpty()) {
-            m_channelStartTimestamps[ch] = bestTimestamp;
-            m_players[ch]->setSource(QUrl::fromLocalFile(bestFile));
-            m_players[ch]->setPosition(qMax<qint64>(0, timestamp - bestTimestamp));
-            setChannelVideoVisible(ch, timestamp >= bestTimestamp);
-            if (timestamp >= bestTimestamp) {
-                m_players[ch]->play();
-            } else {
-                m_players[ch]->pause();
-            }
-            m_channelLabels[ch]->setText(QString("CH%1").arg(ch));
-            m_channelLabels[ch]->adjustSize();
-            setChannelHint(ch, QFileInfo(bestFile).fileName());
-        } else {
-            m_channelStartTimestamps[ch] = 0;
-            m_players[ch]->stop();
-            setChannelVideoVisible(ch, false);
-            m_channelLabels[ch]->setText(QString("CH%1").arg(ch));
-            m_channelLabels[ch]->adjustSize();
-            setChannelHint(ch, tr("无视频"));
-        }
-    }
-    
+    for (int ch = 0; ch < MAX_CHANNELS; ++ch) m_currentVideoIndices[ch] = -1;
     syncPlayersToTimestamp(timestamp, 0, true);
     emit canLogLoadRequested(timestamp);
 }
@@ -648,7 +690,7 @@ bool VideoPlayerManager::handleEventFilter(QObject *watched, QEvent *event, QWid
         auto *switchMenu = menu.addMenu(tr("当前窗口显示通道"));
         for (int i = 0; i < MAX_CHANNELS; i++) {
             QString label = QString("CH%1").arg(i);
-            label += !m_videoFileLists[i].isEmpty() ? tr(" - 有视频") : tr(" - 无视频");
+            label += !m_channelVideos[i].isEmpty() ? tr(" - 有视频") : tr(" - 无视频");
             QAction *action = switchMenu->addAction(label);
             action->setData(i);
             action->setCheckable(true);

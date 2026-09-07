@@ -1,4 +1,19 @@
-build/
+# Build output and local release artifacts
+/build/
+/release/
+/local-archive/
+/docs/
+/packaging/
+*.zip
+*.7z
+*.tar.gz
+*.AppImage
+*.pdb
+*.a
+*.so
+*.so.*
+
+# IDE and local configuration
 *.user
 *.pro.user
 CMakeUserPresets.json
@@ -8,11 +23,17 @@ CMakeUserPresets.json
 *.dll
 *.o
 *.obj
+# Recorded data and runtime logs
 *.mp4
+*.wav
+*.mp3
+*.mkv
+*.avi
 *.log
 can_parser/
 视频文件/
 log文件/
+音频文件/
 .codex/
 doc_output/
 tools/

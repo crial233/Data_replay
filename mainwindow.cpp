@@ -4,12 +4,15 @@
 #include "simple_table_model.h"
 #include "can_data_manager.h"
 #include "video_player_manager.h"
+#include "audio_player_manager.h"
 
 #include <QCalendarWidget>
+#include <QCoreApplication>
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
 #include <QFileDialog>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -18,11 +21,19 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTableView>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QSignalBlocker>
+#include <QSet>
 #include <QVBoxLayout>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QDateTime>
 #include <QDialog>
+#include <QTimer>
+#include <QMediaPlayer>
+#include <QUrl>
+#include <QDebug>
 
 #include <algorithm>
 #include <limits>
@@ -33,13 +44,23 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    // 创建子模块
+    // 临时测试代码（可保留或移除，已确认媒体加载正常）
+    //QMediaPlayer *testPlayer = new QMediaPlayer(this);
+    //testPlayer->setSource(QUrl::fromLocalFile("/home/user/Data_replay/视频文件/1777291427673.mp4"));
+    //connect(testPlayer, &QMediaPlayer::mediaStatusChanged, [](QMediaPlayer::MediaStatus status) {
+        //qDebug() << "Test player status:" << status;
+    //});
+    //connect(testPlayer, &QMediaPlayer::errorOccurred, [](QMediaPlayer::Error error, const QString &errorString) {
+        //qDebug() << "Test player error:" << error << errorString;
+    //});
+
     m_videoManager = new VideoPlayerManager(this);
+    m_audioManager = new AudioPlayerManager(this);
     m_canManager = new CanDataManager(this);
 
     buildUi();
-    initializeDefaultFolders();
     connectSignals();
+    initializeDefaultFolders();
 
     m_videoManager->setViewMode(VideoPlayerManager::View4);
 
@@ -62,38 +83,47 @@ void MainWindow::buildUi()
     resize(1800, 900);
     setMinimumSize(1400, 700);
 
-    // ===== 创建8路播放器+视频widget =====
     m_videoManager->createPlayers(this);
 
-    // ===== 视频网格布局 =====
     auto *videoGridWidget = new QWidget(this);
     videoGridWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_videoManager->setVideoGridWidget(videoGridWidget);
 
-    // ===== 日历widget(常时展开) =====
     m_calendarWidget = new QCalendarWidget(this);
     m_calendarWidget->setSelectedDate(QDate::currentDate());
-    m_calendarWidget->setHorizontalHeaderFormat(QCalendarWidget::ShortDayNames);
+    m_calendarWidget->setHorizontalHeaderFormat(QCalendarWidget::SingleLetterDayNames);
+    m_calendarWidget->setVerticalHeaderFormat(QCalendarWidget::NoVerticalHeader); 
+    m_calendarWidget->setStyleSheet("QCalendarWidget QWidget { font-size: 10px; }");
     m_calendarWidget->setVerticalHeaderFormat(QCalendarWidget::NoVerticalHeader);
     m_calendarWidget->setGridVisible(true);
     m_currentDate = QDate::currentDate();
 
-    // ===== 左侧面板: 文件夹选择 + 视频列表 + 日历 =====
     m_openVideoFolderButton = new QPushButton(tr("选择视频文件夹"), this);
+    m_openAudioFolderButton = new QPushButton(tr("选择音频文件夹"), this);
     m_openCanLogFolderButton = new QPushButton(tr("选择CAN Log文件夹"), this);
     m_videoFolderLabel = new QLabel(tr("未选择视频文件夹"), this);
     m_videoFolderLabel->setWordWrap(true);
     m_videoFolderLabel->setStyleSheet("QLabel { color: gray; font-size: 11px; }");
+    m_audioFolderLabel = new QLabel(tr("未选择音频文件夹"), this);
+    m_audioFolderLabel->setWordWrap(true);
+    m_audioFolderLabel->setStyleSheet("QLabel { color: gray; font-size: 11px; }");
 
     m_videoListWidget = new QListWidget(this);
     m_videoListWidget->setSelectionMode(QAbstractItemView::SingleSelection);
+    // 添加样式表，确保列表项清晰可点击
+    m_videoListWidget->setStyleSheet(
+        "QListWidget::item { color: black; }"
+        "QListWidget::item:selected { background-color: #3399FF; color: white; }"
+    );
     m_videoManager->setVideoListWidget(m_videoListWidget);
 
     auto *leftLayout = new QVBoxLayout;
     leftLayout->setSpacing(4);
     leftLayout->addWidget(m_openVideoFolderButton);
+    leftLayout->addWidget(m_openAudioFolderButton);
     leftLayout->addWidget(m_openCanLogFolderButton);
     leftLayout->addWidget(m_videoFolderLabel);
+    leftLayout->addWidget(m_audioFolderLabel);
     leftLayout->addWidget(new QLabel(tr("视频列表:"), this));
     leftLayout->addWidget(m_videoListWidget, 1);
     leftLayout->addWidget(m_calendarWidget);
@@ -103,7 +133,7 @@ void MainWindow::buildUi()
     leftWidget->setMinimumWidth(220);
     leftWidget->setMaximumWidth(320);
 
-    // ===== 中间面板: 视频播放区 + 控制栏 =====
+    // ===== 中间面板 =====
     m_playButton = new QPushButton(tr("播放"), this);
 
     m_speedComboBox = new QComboBox(this);
@@ -206,7 +236,6 @@ void MainWindow::buildUi()
     m_canRawTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_canRawTable->setAlternatingRowColors(true);
 
-    // 注入CAN表格到CanDataManager
     m_canManager->setCanTables(m_canTable, m_canRawTable, m_canTableModel, m_canRawTableModel);
 
     auto *rightLayout = new QVBoxLayout;
@@ -219,10 +248,10 @@ void MainWindow::buildUi()
     m_canSidebarWidget->setLayout(rightLayout);
     m_canSidebarWidget->setMinimumWidth(250);
 
-    m_canSidebarEdgeButton = new QPushButton(tr(">"), this);
+    m_canSidebarEdgeButton = new QPushButton(tr("<"), this);
     m_canSidebarEdgeButton->setFixedSize(24, 72);
     m_canSidebarEdgeButton->setCursor(Qt::PointingHandCursor);
-    m_canSidebarEdgeButton->setToolTip(tr("显示CAN数据"));
+    m_canSidebarEdgeButton->setToolTip(tr("隐藏CAN数据"));
     m_canSidebarEdgeButton->setStyleSheet(
         "QPushButton {"
         " border: 1px solid #b8bcc8;"
@@ -247,20 +276,19 @@ void MainWindow::buildUi()
     m_canSidebarToggleStrip->setLayout(toggleStripLayout);
     m_canSidebarToggleStrip->setStyleSheet("QWidget { background: transparent; }");
 
-    // ===== 主分割器: 左 | 中 | CAN | 右侧按钮 =====
     m_mainSplitter = new QSplitter(this);
     m_mainSplitter->addWidget(leftWidget);
     m_mainSplitter->addWidget(centerWidget);
     m_mainSplitter->addWidget(m_canSidebarWidget);
     m_mainSplitter->addWidget(m_canSidebarToggleStrip);
-    m_mainSplitter->setStretchFactor(0, 0);   // 左侧: 固定宽度
-    m_mainSplitter->setStretchFactor(1, 5);   // 中间: 视频区域(更大)
-    m_mainSplitter->setStretchFactor(2, 2);   // 右侧: CAN数据区域
-    m_mainSplitter->setStretchFactor(3, 0);   // 右侧按钮: 固定宽度
+    m_mainSplitter->setStretchFactor(0, 0);
+    m_mainSplitter->setStretchFactor(1, 5);
+    m_mainSplitter->setStretchFactor(2, 2);
+    m_mainSplitter->setStretchFactor(3, 0);
     QList<int> sizes;
-    sizes << 260 << 1400 << 0 << 28;
+    sizes << 290 << 990 << 400 << 28;
     m_mainSplitter->setSizes(sizes);
-    m_canSidebarWidget->setVisible(false);
+    m_canSidebarWidget->setVisible(true);
 
     setCentralWidget(m_mainSplitter);
     setStatus(tr("请选择视频文件夹和 CAN Log文件夹，然后选择日期加载视频列表"));
@@ -268,11 +296,10 @@ void MainWindow::buildUi()
 
 void MainWindow::connectSignals()
 {
-    // 文件夹选择按钮
     connect(m_openVideoFolderButton, &QPushButton::clicked, this, &MainWindow::openVideoFolder);
+    connect(m_openAudioFolderButton, &QPushButton::clicked, this, &MainWindow::openAudioFolder);
     connect(m_openCanLogFolderButton, &QPushButton::clicked, this, &MainWindow::openCanLogFolder);
 
-    // 视频列表选择
     connect(m_videoListWidget, &QListWidget::currentRowChanged, this, [this](int row) {
         QListWidgetItem *item = m_videoListWidget->item(row);
         if (!item) return;
@@ -291,12 +318,12 @@ void MainWindow::connectSignals()
             m_replayClock.play();
             m_canManager->setBaseTimestampMs(m_baseTimestampMs);
             m_videoManager->playAllChannels(timestamp);
+            m_audioManager->syncToTimestamp(timestamp, 0, true);
             m_timelineWidget->setPositionMs(dayOffsetMs);
             setPlaybackUi(true);
         }
     });
 
-    // 日历选择
     connect(m_calendarWidget, &QCalendarWidget::selectionChanged, this, [this]() {
         QDate newDate = m_calendarWidget->selectedDate();
         if (newDate != m_currentDate) {
@@ -305,30 +332,25 @@ void MainWindow::connectSignals()
         }
     });
 
-    // 为每个视频widget添加事件过滤器
     for (int i = 0; i < VideoPlayerManager::MAX_CHANNELS; i++) {
         m_videoManager->channelContainer(i)->installEventFilter(this);
         m_videoManager->videoWidget(i)->installEventFilter(this);
     }
 
-    // 主播放器只提供媒体状态，回放进度由 ReplayClock 统一驱动
     QMediaPlayer *masterPlayer = m_videoManager->masterPlayer();
     connect(masterPlayer, &QMediaPlayer::durationChanged, this, &MainWindow::updateDuration);
-
-    // 监听主播放器状态变化
     connect(masterPlayer, &QMediaPlayer::playbackStateChanged, this, [this](QMediaPlayer::PlaybackState state) {
         setPlaybackUi(state == QMediaPlayer::PlayingState);
     });
 
-    // 倍速选择器
     connect(m_speedComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
         qreal rate = m_speedComboBox->itemData(index).toDouble();
         m_replayClock.setPlaybackRate(rate);
         m_videoManager->setPlaybackRate(rate);
+        m_audioManager->setPlaybackRate(rate);
         setStatus(tr("播放速率: x%1").arg(rate, 0, 'f', 2));
     });
 
-    // CAN更新定时器
     connect(m_canUpdateTimer, &QTimer::timeout, this, [this]() {
         if (!m_replayClock.isPlaying()) {
             qint64 displayPos = (m_canManager->lastSeekPositionMs() >= 0)
@@ -345,7 +367,6 @@ void MainWindow::connectSignals()
     connect(m_timelineWidget, &ReplayTimelineWidget::positionSelected,
             this, &MainWindow::seekOnTimeline);
 
-    // 播放按钮
     connect(m_playButton, &QPushButton::clicked, this, &MainWindow::togglePlayback);
     connect(m_showRawCanFramesButton, &QPushButton::clicked, this, &MainWindow::showRawCanFramesDialog);
     auto connectSeekButton = [this](QPushButton *button, qint64 deltaMs) {
@@ -362,30 +383,24 @@ void MainWindow::connectSignals()
     connectSeekButton(m_forward5Button, 5000);
     connectSeekButton(m_forward15Button, 15000);
     connectSeekButton(m_forward30Button, 30000);
-    connect(m_canSidebarEdgeButton, &QPushButton::clicked, this, [this]() {
-        if (!m_canSidebarWidget || !m_mainSplitter) {
-            return;
-        }
 
+    connect(m_canSidebarEdgeButton, &QPushButton::clicked, this, [this]() {
+        if (!m_canSidebarWidget || !m_mainSplitter) return;
         const bool showSidebar = !m_canSidebarWidget->isVisible();
         m_canSidebarWidget->setVisible(showSidebar);
         m_canSidebarEdgeButton->setText(showSidebar ? tr("<") : tr(">"));
         m_canSidebarEdgeButton->setToolTip(showSidebar ? tr("隐藏CAN数据") : tr("显示CAN数据"));
-
         if (showSidebar) {
             QList<int> sizes = m_mainSplitter->sizes();
             if (sizes.size() == 4 && sizes[2] <= 0) {
                 sizes[2] = 400;
-                if (sizes[1] > 400) {
-                    sizes[1] -= 400;
-                }
+                if (sizes[1] > 400) sizes[1] -= 400;
                 sizes[3] = 28;
                 m_mainSplitter->setSizes(sizes);
             }
         }
     });
 
-    // VideoPlayerManager信号
     connect(m_videoManager, &VideoPlayerManager::canCacheClearRequested, this, [this]() {
         m_canManager->clearCanCache();
     });
@@ -397,14 +412,17 @@ void MainWindow::connectSignals()
     connect(m_videoManager, &VideoPlayerManager::statusMessage, this, [this](const QString &msg) {
         setStatus(msg);
     });
-
-    // CanDataManager信号
+    connect(m_videoManager, &VideoPlayerManager::videoListLoaded, this, [this](bool hasVideos) {
+        m_timelineWidget->setAvailabilityRanges(
+            m_videoManager->availabilityRangesForDate(m_currentDate));
+        if (hasVideos && m_videoListWidget && m_videoListWidget->count() > 0) {
+            m_videoListWidget->setCurrentRow(0);
+        }
+    });
     connect(m_canManager, &CanDataManager::statusMessage, this, [this](const QString &msg) {
         m_canStatusLabel->setText(msg);
     });
 }
-
-// ===== 播放控制 =====
 
 void MainWindow::togglePlayback()
 {
@@ -422,9 +440,9 @@ void MainWindow::togglePlayback()
     if (isPlaying) {
         m_replayClock.pause();
         m_videoManager->pauseAll();
+        m_audioManager->pause();
         updateFromReplayClock();
     } else {
-        // 播放前检查是否有视频
         bool hasVideo = false;
         for (int i = 0; i < VideoPlayerManager::MAX_CHANNELS; i++) {
             if (m_videoManager->hasVideo(i)) {
@@ -439,6 +457,7 @@ void MainWindow::togglePlayback()
         m_canManager->setLastCanUpdateMs(-1);
         m_replayClock.play();
         m_videoManager->syncPlayersToTimestamp(m_replayClock.currentTimestampMs(), 0, true);
+        m_audioManager->syncToTimestamp(m_replayClock.currentTimestampMs(), 0, true);
     }
     setPlaybackUi(m_replayClock.isPlaying());
 }
@@ -447,6 +466,7 @@ void MainWindow::setPlaybackRate(qreal rate)
 {
     m_replayClock.setPlaybackRate(rate);
     m_videoManager->setPlaybackRate(rate);
+    m_audioManager->setPlaybackRate(rate);
     setStatus(tr("播放速率: x%1").arg(rate, 0, 'f', 2));
 }
 
@@ -454,6 +474,7 @@ void MainWindow::seekOnTimeline(qint64 positionMs)
 {
     m_replayClock.seek(positionMs);
     m_videoManager->syncPlayersToTimestamp(m_replayClock.currentTimestampMs(), 0, m_replayClock.isPlaying());
+    m_audioManager->syncToTimestamp(m_replayClock.currentTimestampMs(), 0, m_replayClock.isPlaying());
 
     bool inRange = false;
     if (m_canManager->hasCanData()) {
@@ -475,8 +496,6 @@ void MainWindow::seekOnTimeline(qint64 positionMs)
     updatePosition(positionMs);
 }
 
-// ===== 位置更新 =====
-
 void MainWindow::updateFromReplayClock()
 {
     qint64 offsetMs = m_replayClock.currentOffsetMs();
@@ -485,10 +504,15 @@ void MainWindow::updateFromReplayClock()
         m_replayClock.seek(offsetMs);
         m_replayClock.pause();
         m_videoManager->pauseAll();
+        m_audioManager->pause();
         setPlaybackUi(false);
     }
 
     m_videoManager->syncPlayersToTimestamp(
+        m_replayClock.currentTimestampMs(),
+        m_replayClock.isPlaying() ? 150 : 0,
+        m_replayClock.isPlaying());
+    m_audioManager->syncToTimestamp(
         m_replayClock.currentTimestampMs(),
         m_replayClock.isPlaying() ? 150 : 0,
         m_replayClock.isPlaying());
@@ -500,7 +524,6 @@ void MainWindow::updatePosition(qint64 positionMs)
 {
     m_timelineWidget->setPositionMs(positionMs);
 
-    // 时间戳显示
     if (m_baseTimestampMs > 0) {
         qint64 currentTimestamp = m_baseTimestampMs + positionMs;
         m_timeLabel->setText(QString("%1 / 24:00:00.000")
@@ -516,7 +539,6 @@ void MainWindow::updatePosition(qint64 positionMs)
         : (m_baseTimestampMs + positionMs);
     m_canManager->loadNextCanLogIfNeeded(checkTimestamp);
 
-    // 降低CAN显示更新频率
     qreal rate = m_speedComboBox->currentData().toDouble();
     if (rate <= 0) rate = 1.0;
     qint64 thresholdMs = qMax(5LL, static_cast<qint64>(500 * rate));
@@ -545,6 +567,7 @@ void MainWindow::showRawCanFramesDialog()
 {
     m_replayClock.pause();
     m_videoManager->pauseAll();
+    m_audioManager->pause();
     updateFromReplayClock();
     setPlaybackUi(false);
     m_playButton->setEnabled(false);
@@ -555,6 +578,10 @@ void MainWindow::showRawCanFramesDialog()
 
     auto *dialog = new QDialog(this);
     m_rawCanFramesDialog = dialog;
+    m_lastRawCanFramesDialogPositionMs = -1;
+    QFont dialogFont = dialog->font();
+    dialogFont.setPointSize(qMax(11, dialogFont.pointSize() + 2));
+    dialog->setFont(dialogFont);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("当前时间戳前后 CAN 原始帧"));
     dialog->resize(1350, 720);
@@ -563,7 +590,8 @@ void MainWindow::showRawCanFramesDialog()
         m_rawCanFramesDialog = nullptr;
         m_rawCanFramesInfoLabel = nullptr;
         m_rawCanFramesTable = nullptr;
-        m_rawCanFramesModel = nullptr;
+        m_rawCanIdFilter = nullptr;
+        m_lastRawCanFramesDialogPositionMs = -1;
     });
 
     auto *layout = new QVBoxLayout(dialog);
@@ -580,6 +608,7 @@ void MainWindow::showRawCanFramesDialog()
             seekOnTimeline(targetMs);
             m_replayClock.pause();
             m_videoManager->pauseAll();
+            m_audioManager->pause();
             setPlaybackUi(false);
         });
     };
@@ -592,36 +621,62 @@ void MainWindow::showRawCanFramesDialog()
     stepLayout->addStretch();
     layout->addLayout(stepLayout);
 
-    m_rawCanFramesTable = new QTableView(dialog);
-    m_rawCanFramesModel = new SimpleTableModel({tr("解析时间戳"), tr("原始时间戳"), tr("CAN ID"), tr("数据"), tr("解析结果")}, dialog);
-    m_rawCanFramesTable->setModel(m_rawCanFramesModel);
-    m_rawCanFramesTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-    m_rawCanFramesTable->horizontalHeader()->setStretchLastSection(false);
+    auto *filterLayout = new QHBoxLayout;
+    filterLayout->addWidget(new QLabel(tr("CAN ID 筛选:"), dialog));
+    m_rawCanIdFilter = new QComboBox(dialog);
+    m_rawCanIdFilter->addItem(tr("全部"), QString());
+    m_rawCanIdFilter->setMinimumWidth(180);
+    m_rawCanIdFilter->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    m_rawCanIdFilter->setMinimumContentsLength(14);
+    filterLayout->addWidget(m_rawCanIdFilter);
+    filterLayout->addStretch();
+    layout->addLayout(filterLayout);
+
+    m_rawCanFramesTable = new QTreeWidget(dialog);
+    m_rawCanFramesTable->setColumnCount(4);
+    m_rawCanFramesTable->setHeaderLabels({tr("解析时间戳"), tr("原始时间戳"), tr("CAN ID"), tr("详细内容")});
+    m_rawCanFramesTable->header()->setSectionResizeMode(QHeaderView::Interactive);
+    m_rawCanFramesTable->header()->setStretchLastSection(false);
     m_rawCanFramesTable->setColumnWidth(0, 180);
     m_rawCanFramesTable->setColumnWidth(1, 160);
     m_rawCanFramesTable->setColumnWidth(2, 90);
-    m_rawCanFramesTable->setColumnWidth(3, 240);
-    m_rawCanFramesTable->setColumnWidth(4, 650);
-    m_rawCanFramesTable->verticalHeader()->setVisible(false);
-    m_rawCanFramesTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_rawCanFramesTable->setColumnWidth(3, 650);
+    m_rawCanFramesMaximumWidths = {180, 160, 90, 650};
     m_rawCanFramesTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_rawCanFramesTable->setAlternatingRowColors(true);
+    m_rawCanFramesTable->setRootIsDecorated(true);
+    m_rawCanFramesTable->setUniformRowHeights(true);
     layout->addWidget(m_rawCanFramesTable, 1);
 
-    connect(m_rawCanFramesTable, &QTableView::clicked, this, [this](const QModelIndex &index) {
-        if (!index.isValid() || !m_rawCanFramesModel) {
-            return;
+    connect(m_rawCanIdFilter, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (!m_rawCanFramesTable || !m_rawCanIdFilter) return;
+        const QString selectedId = m_rawCanIdFilter->currentData().toString();
+        for (int i = 0; i < m_rawCanFramesTable->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = m_rawCanFramesTable->topLevelItem(i);
+            item->setHidden(!selectedId.isEmpty() && item->text(2) != selectedId);
         }
-        const QString parsedDateTime = m_rawCanFramesModel->data(m_rawCanFramesModel->index(index.row(), 0)).toString();
+    });
+
+    connect(m_rawCanFramesTable, &QTreeWidget::itemClicked, this, [](QTreeWidgetItem *item, int column) {
+        if (!item) return;
+        // 第 0 列左侧箭头由 QTreeWidget 自己处理；点击其余父项区域也可展开/收起。
+        if (!item->parent() && item->childCount() > 0 && column != 0) {
+            item->setExpanded(!item->isExpanded());
+        }
+    });
+
+    connect(m_rawCanFramesTable, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        if (!item) return;
+        QTreeWidgetItem *frameItem = item->parent() ? item->parent() : item;
+        const QString parsedDateTime = frameItem->text(0);
         const QString parsedTime = parsedDateTime.section('|', 1).trimmed();
         const QTime parsed = QTime::fromString(parsedTime, "HH:mm:ss.zzz");
-        if (!parsed.isValid()) {
-            return;
-        }
+        if (!parsed.isValid()) return;
 
         seekOnTimeline(QTime(0, 0).msecsTo(parsed));
         m_replayClock.pause();
         m_videoManager->pauseAll();
+        m_audioManager->pause();
         setPlaybackUi(false);
     });
 
@@ -631,21 +686,18 @@ void MainWindow::showRawCanFramesDialog()
 
 void MainWindow::refreshRawCanFramesDialog(qint64 positionMs)
 {
-    if (!m_rawCanFramesDialog || !m_rawCanFramesModel || !m_rawCanFramesInfoLabel) {
-        return;
-    }
+    if (!m_rawCanFramesDialog || !m_rawCanFramesTable || !m_rawCanFramesInfoLabel) return;
+    // 暂停状态下主时钟仍会周期更新界面；同一位置不重复重建树，避免展开项被收回。
+    if (positionMs == m_lastRawCanFramesDialogPositionMs) return;
+    m_lastRawCanFramesDialogPositionMs = positionMs;
 
     QVector<QStringList> rows = m_canManager->rawFrameRowsAround(positionMs, 500);
     QString currentOriginalTimestamp = tr("无");
     qint64 bestDiff = -1;
     for (const QStringList &row : rows) {
-        if (row.size() < 2) {
-            continue;
-        }
+        if (row.size() < 2) continue;
         const QTime parsed = QTime::fromString(row[0].section('|', 1).trimmed(), "HH:mm:ss.zzz");
-        if (!parsed.isValid()) {
-            continue;
-        }
+        if (!parsed.isValid()) continue;
         const qint64 rowTime = QTime(0, 0).msecsTo(parsed);
         const qint64 diff = qAbs(rowTime - positionMs);
         if (bestDiff < 0 || diff < bestDiff) {
@@ -654,13 +706,89 @@ void MainWindow::refreshRawCanFramesDialog(qint64 positionMs)
         }
     }
 
-    m_rawCanFramesModel->setRows(std::move(rows));
+    const QString selectedId = m_rawCanIdFilter ? m_rawCanIdFilter->currentData().toString() : QString();
+    QSet<QString> canIds;
+    m_rawCanFramesTable->clear();
+    QTreeWidgetItem *currentParent = nullptr;
+    QString currentCanId;
+    qint64 groupedOriginalTimestamp = -1;
+    for (const QStringList &row : rows) {
+        if (row.size() < 5) continue;
+        canIds.insert(row[2]);
+        bool timestampOk = false;
+        const qint64 originalTimestamp = row[1].toLongLong(&timestampOk);
+        // 原始帧与紧随其后的解析帧偶尔会相差 1ms。相同 CAN ID 在 5ms
+        // 内视为同一帧；正常报文周期远大于该容差，不会误合并相邻帧。
+        const bool sameFrame = currentParent && timestampOk &&
+            row[2] == currentCanId && groupedOriginalTimestamp >= 0 &&
+            qAbs(originalTimestamp - groupedOriginalTimestamp) <= 5;
+        if (!sameFrame) {
+            currentCanId = row[2];
+            groupedOriginalTimestamp = timestampOk ? originalTimestamp : -1;
+            currentParent = new QTreeWidgetItem(m_rawCanFramesTable, row.mid(0, 3));
+            currentParent->setText(3, tr("点击展开"));
+            if (!row[3].isEmpty()) {
+                auto *rawChild = new QTreeWidgetItem(currentParent);
+                rawChild->setText(3, tr("原始数据: %1").arg(row[3]));
+            }
+        }
+        if (!row[4].isEmpty()) {
+            auto *child = new QTreeWidgetItem(currentParent);
+            child->setText(3, row[4]);
+        }
+        currentParent->setText(3, tr("点击展开 (%1)").arg(currentParent->childCount()));
+    }
+
+    if (m_rawCanIdFilter) {
+        QStringList sortedIds = canIds.values();
+        std::sort(sortedIds.begin(), sortedIds.end());
+        const QSignalBlocker blocker(m_rawCanIdFilter);
+        m_rawCanIdFilter->clear();
+        m_rawCanIdFilter->addItem(tr("全部"), QString());
+        for (const QString &canId : sortedIds) m_rawCanIdFilter->addItem(canId, canId);
+        const int selectedIndex = selectedId.isEmpty() ? 0 : m_rawCanIdFilter->findData(selectedId);
+        m_rawCanIdFilter->setCurrentIndex(qMax(0, selectedIndex));
+    }
+    const QString activeId = m_rawCanIdFilter ? m_rawCanIdFilter->currentData().toString() : QString();
+    for (int i = 0; i < m_rawCanFramesTable->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_rawCanFramesTable->topLevelItem(i);
+        item->setHidden(!activeId.isEmpty() && item->text(2) != activeId);
+    }
+
+    QVector<QStringList> widthRows;
+    widthRows.reserve(rows.size() * 2);
+    for (const QStringList &row : rows) {
+        if (row.size() < 5) continue;
+        if (!row[3].isEmpty()) widthRows.append({row[0], row[1], row[2], tr("原始数据: %1").arg(row[3])});
+        if (!row[4].isEmpty()) widthRows.append({row[0], row[1], row[2], row[4]});
+    }
+    growRawCanFramesColumnWidths(widthRows);
     m_rawCanFramesInfoLabel->setText(tr("解析时间戳: %1 | 原始时间戳: %2 | 显示前后500ms内原始帧%3")
         .arg(CanDataManager::formatDateTime(m_baseTimestampMs + positionMs))
         .arg(currentOriginalTimestamp)
-        .arg(m_rawCanFramesModel->rowCount() == 0 ? tr(" | 无 CAN 原始帧") : QString()));
+        .arg(rows.isEmpty() ? tr(" | 无 CAN 原始帧") : QString()));
 }
-// ===== UI辅助 =====
+
+void MainWindow::growRawCanFramesColumnWidths(const QVector<QStringList> &rows)
+{
+    if (!m_rawCanFramesTable || rows.isEmpty()) return;
+
+    const QFontMetrics metrics(m_rawCanFramesTable->font());
+    for (const QStringList &row : rows) {
+        if (m_rawCanFramesMaximumWidths.size() < row.size()) {
+            m_rawCanFramesMaximumWidths.resize(row.size());
+        }
+        for (int column = 0; column < row.size(); ++column) {
+            const int requiredWidth = metrics.horizontalAdvance(row[column]) + 24;
+            if (requiredWidth <= m_rawCanFramesMaximumWidths[column]) continue;
+
+            m_rawCanFramesMaximumWidths[column] = requiredWidth;
+            m_rawCanFramesTable->setColumnWidth(
+                column,
+                qMax(m_rawCanFramesTable->columnWidth(column), requiredWidth));
+        }
+    }
+}
 
 void MainWindow::setPlaybackUi(bool playing)
 {
@@ -688,12 +816,18 @@ void MainWindow::initializeDefaultFolders()
         m_canManager->loadCanLogFolder();
     }
 
+    const QString audioPath = defaultAudioFolderPath();
+    if (QDir(audioPath).exists()) {
+        m_audioManager->setAudioFolderPath(audioPath);
+        m_audioManager->loadForDate(m_currentDate);
+        m_audioFolderLabel->setText(audioPath);
+        m_audioFolderLabel->setStyleSheet("QLabel { color: black; font-size: 11px; }");
+    }
+
     if (QDir(videoPath).exists() || QDir(canLogPath).exists()) {
         setStatus(tr("已加载默认路径：视频=%1 | CAN Log=%2").arg(videoPath, canLogPath));
     }
 }
-
-// ===== 文件夹选择 =====
 
 void MainWindow::openVideoFolder()
 {
@@ -723,11 +857,26 @@ void MainWindow::openCanLogFolder()
     m_canManager->loadCanLogFolder();
     setStatus(tr("已选择CAN Log文件夹: %1").arg(folderPath));
 
-    // 如果视频正在播放或已有基准时间戳，自动加载对应的CAN数据
     if (m_baseTimestampMs > 0 && !m_canManager->canLogFileList().isEmpty()) {
         qint64 currentPosition = m_replayClock.currentOffsetMs();
         m_canManager->loadCanLogByTimestamp(m_baseTimestampMs, currentPosition);
     }
+}
+
+void MainWindow::openAudioFolder()
+{
+    const QString startPath = m_audioManager->audioFolderPath().isEmpty()
+        ? defaultAudioFolderPath() : m_audioManager->audioFolderPath();
+    const QString folderPath = QFileDialog::getExistingDirectory(this, tr("选择音频文件夹"), startPath);
+    if (folderPath.isEmpty()) return;
+
+    m_audioManager->setAudioFolderPath(folderPath);
+    m_audioManager->loadForDate(m_currentDate);
+    m_audioFolderLabel->setText(folderPath);
+    m_audioFolderLabel->setStyleSheet("QLabel { color: black; font-size: 11px; }");
+    setStatus(tr("已选择音频文件夹: %1，找到 %2 个音频文件")
+        .arg(folderPath).arg(m_audioManager->audioFileCount()));
+    m_audioManager->syncToTimestamp(m_replayClock.currentTimestampMs(), 0, m_replayClock.isPlaying());
 }
 
 void MainWindow::onDateChanged(const QDate &date)
@@ -739,20 +888,19 @@ void MainWindow::onDateChanged(const QDate &date)
     m_replayClock.seek(0);
     m_canManager->setBaseTimestampMs(m_baseTimestampMs);
     m_timelineWidget->setPositionMs(0);
+    m_audioManager->loadForDate(date);
     setPlaybackUi(false);
 
     if (!m_videoManager->videoFolderPath().isEmpty()) {
         loadVideoList(date);
     }
+
 }
 
 void MainWindow::loadVideoList(const QDate &date)
 {
     m_videoManager->loadAllChannels(date);
-    m_timelineWidget->setAvailabilityRanges(m_videoManager->availabilityRangesForDate(date));
 }
-
-// ===== 时间戳工具 =====
 
 QDate MainWindow::dateFromTimestamp(qint64 timestampMs) const
 {
@@ -768,15 +916,18 @@ qint64 MainWindow::timestampFromDate(const QDate &date) const
 
 QString MainWindow::defaultVideoFolderPath() const
 {
-    return QFileInfo(QString::fromUtf8(__FILE__)).absoluteDir().filePath(QString::fromUtf8("视频文件"));
+    return QDir(qEnvironmentVariable("DATA_REPLAY_HOME", QCoreApplication::applicationDirPath())).filePath(QString::fromUtf8("视频文件"));
 }
 
 QString MainWindow::defaultCanLogFolderPath() const
 {
-    return QFileInfo(QString::fromUtf8(__FILE__)).absoluteDir().filePath(QString::fromUtf8("log文件"));
+    return QDir(qEnvironmentVariable("DATA_REPLAY_HOME", QCoreApplication::applicationDirPath())).filePath(QString::fromUtf8("log文件"));
 }
 
-// ===== 事件过滤 =====
+QString MainWindow::defaultAudioFolderPath() const
+{
+    return QDir(qEnvironmentVariable("DATA_REPLAY_HOME", QCoreApplication::applicationDirPath())).filePath(QString::fromUtf8("音频文件"));
+}
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {

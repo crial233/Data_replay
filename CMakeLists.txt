@@ -23,6 +23,8 @@ set(PROJECT_SOURCES
         can_data_manager.h
         video_player_manager.cpp
         video_player_manager.h
+        audio_player_manager.cpp
+        audio_player_manager.h
         replay_clock.cpp
         replay_clock.h
         replay_timeline_widget.cpp

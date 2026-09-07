@@ -8,6 +8,7 @@
 #include "simple_table_model.h"
 #include "can_data_manager.h"
 #include "video_player_manager.h"
+#include "audio_player_manager.h"
 #include "replay_clock.h"
 #include "replay_timeline_widget.h"
 
@@ -20,6 +21,7 @@ QT_END_NAMESPACE
 class QLabel;
 class QPushButton;
 class QTableView;
+class QTreeWidget;
 class QComboBox;
 class QCalendarWidget;
 class QListWidget;
@@ -41,6 +43,7 @@ private:
     void buildUi();
     void connectSignals();
     void openVideoFolder();
+    void openAudioFolder();
     void openCanLogFolder();
     void onDateChanged(const QDate &date);
     void togglePlayback();
@@ -51,6 +54,7 @@ private:
     void updateFromReplayClock();
     void showRawCanFramesDialog();
     void refreshRawCanFramesDialog(qint64 positionMs);
+    void growRawCanFramesColumnWidths(const QVector<QStringList> &rows);
     void setPlaybackUi(bool playing);
     void setStatus(const QString &message);
     void loadVideoList(const QDate &date);
@@ -59,21 +63,25 @@ private:
     QDate dateFromTimestamp(qint64 timestampMs) const;
     qint64 timestampFromDate(const QDate &date) const;
     QString defaultVideoFolderPath() const;
+    QString defaultAudioFolderPath() const;
     QString defaultCanLogFolderPath() const;
 
     Ui::MainWindow *ui;
 
     // 子模块
     VideoPlayerManager *m_videoManager = nullptr;
+    AudioPlayerManager *m_audioManager = nullptr;
     CanDataManager *m_canManager = nullptr;
 
     // UI组件
     QPushButton *m_openVideoFolderButton = nullptr;
+    QPushButton *m_openAudioFolderButton = nullptr;
     QPushButton *m_openCanLogFolderButton = nullptr;
     QPushButton *m_playButton = nullptr;
     QPushButton *m_canSidebarEdgeButton = nullptr;
     QListWidget *m_videoListWidget = nullptr;
     QLabel *m_videoFolderLabel = nullptr;
+    QLabel *m_audioFolderLabel = nullptr;
     QComboBox *m_speedComboBox = nullptr;
     QPushButton *m_rewind30Button = nullptr;
     QPushButton *m_rewind15Button = nullptr;
@@ -93,8 +101,10 @@ private:
     QTableView *m_canRawTable = nullptr;
     QDialog *m_rawCanFramesDialog = nullptr;
     QLabel *m_rawCanFramesInfoLabel = nullptr;
-    QTableView *m_rawCanFramesTable = nullptr;
-    SimpleTableModel *m_rawCanFramesModel = nullptr;
+    QTreeWidget *m_rawCanFramesTable = nullptr;
+    QComboBox *m_rawCanIdFilter = nullptr;
+    QVector<int> m_rawCanFramesMaximumWidths;
+    qint64 m_lastRawCanFramesDialogPositionMs = -1;
     QWidget *m_canSidebarWidget = nullptr;
     QWidget *m_canSidebarToggleStrip = nullptr;
     QSplitter *m_mainSplitter = nullptr;

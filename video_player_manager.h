@@ -9,6 +9,8 @@
 #include <QVideoWidget>
 #include <QAudioOutput>
 #include <QGridLayout>
+#include <QHash>
+#include <QElapsedTimer>
 
 class QLabel;
 class QListWidget;
@@ -84,7 +86,7 @@ public:
     QWidget *videoWidget(int channel) const { return m_videoWidgets[channel]; }
 
     // 获取视频文件列表（判断是否有视频）
-    bool hasVideo(int channel) const { return !m_videoFileLists[channel].isEmpty(); }
+    bool hasVideo(int channel) const { return !m_channelVideos[channel].isEmpty(); }
 
     // 停止所有播放器
     void stopAll();
@@ -92,13 +94,42 @@ public:
     // 事件过滤
     bool handleEventFilter(QObject *watched, QEvent *event, QWidget *menuParent);
 
+    // 时间戳解析工具（公有，供 CanDataManager 调用）
+    static qint64 timestampFromVideoFileName(const QString &baseName, bool *ok = nullptr);
+
+    // 以下函数原先为 public，保持此访问级别
+    int displaySlotForChannel(int channel) const;
+    void setDisplaySlotChannel(int slot, int channel);
+    void setChannelVideoVisible(int channel, bool visible);
+    void setChannelHint(int channel, const QString &detail = QString());
+    void setChannelOverlayVisible(int channel, bool visible);
+
 signals:
     void viewModeChanged(ViewMode mode);
     void statusMessage(const QString &message);
     void canCacheClearRequested();
     void canLogLoadRequested(qint64 timestamp);
+    void videoListLoaded(bool hasVideos);
 
 private:
+    struct VideoEntry {
+        qint64 timestamp = 0;
+        QString path;
+        int channel = -1;
+    };
+
+    struct ScanResult {
+        QVector<VideoEntry> channels[MAX_CHANNELS];
+        QHash<qint64, quint8> channelsByTimestamp;
+        int totalVideos = 0;
+        int activeChannels = 0;
+    };
+
+    static ScanResult scanVideoFolder(const QString &folderPath, const QDate &date);
+    void applyScanResult(const ScanResult &result, const QDate &date, quint64 generation);
+    bool isChannelDisplayed(int channel) const;
+    bool selectVideoForTimestamp(int channel, qint64 timestamp);
+
     // 8路播放器
     QMediaPlayer *m_players[MAX_CHANNELS] = {};
     QAudioOutput *m_audioOutputs[MAX_CHANNELS] = {};
@@ -119,20 +150,19 @@ private:
 
     // 视频文件夹
     QString m_videoFolderPath;
-    QVector<QString> m_videoFileLists[MAX_CHANNELS];
+    QVector<VideoEntry> m_channelVideos[MAX_CHANNELS];
+    QHash<qint64, quint8> m_channelsByTimestamp;
     qint64 m_channelStartTimestamps[MAX_CHANNELS] = {};
+    int m_currentVideoIndices[MAX_CHANNELS] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    quint64 m_scanGeneration = 0;
+    QElapsedTimer m_driftCorrectionTimer;
+    bool m_forceDriftCorrection = true;
 
-    // 每个显示格子对应的视频通道。右键切换只改变当前格子映射，不改变整体视图模式。
+    // 每个显示格子对应的视频通道
     int m_displayChannels[MAX_CHANNELS] = {0, 1, 2, 3, 4, 5, 6, 7};
 
-    // 日期转时间戳工具
+    // 日期转时间戳工具（私有）
     static qint64 timestampFromDate(const QDate &date);
-    static qint64 timestampFromVideoFileName(const QString &baseName, bool *ok = nullptr);
-    int displaySlotForChannel(int channel) const;
-    void setDisplaySlotChannel(int slot, int channel);
-    void setChannelVideoVisible(int channel, bool visible);
-    void setChannelHint(int channel, const QString &detail = QString());
-    void setChannelOverlayVisible(int channel, bool visible);
 };
 
 #endif // VIDEO_PLAYER_MANAGER_H
