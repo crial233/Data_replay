@@ -1,32 +1,277 @@
-# Data Replay
+# Data Replay 数据回放工具
 
-基于 Qt 的桌面数据回放工具，支持多路视频、CAN 日志和音频回放。
+Data Replay 是使用 **C++17 + Qt 6 Widgets** 开发的桌面程序，用于按同一时间轴查看多路视频、CAN 日志和独立录制的音频，适合定位某一时刻的车辆画面、信号数值和原始报文。
 
-## 构建
+当前已完成 **Windows x64 Release 编译和独立启动验证**。Linux 版尚未构建或验证；真实数据的完整回放流程尚未完成全面测试。
 
-已验证工具链：Qt 6.7.2（MinGW 64 位）、MinGW 11.2、CMake、Ninja。
-Qt 需要 Widgets、Multimedia、MultimediaWidgets、Concurrent 模块。
+## 1. 软件功能
 
-将 CMake、Ninja 和 MinGW 的 bin 目录加入 PATH，在项目根目录执行以下命令。
-请将 Qt SDK 路径替换为本机实际路径：
+| 功能 | 当前实现 |
+| --- | --- |
+| 多路视频 | 最多 8 路，通道编号 CH0～CH7；支持 1 路、4 路、8 路视图，初始为 4 路 |
+| 通道切换 | 在视频区域右键选择当前窗口显示的通道，或切换视图布局 |
+| 视频放大 | 双击视频在单路与四路视图之间切换 |
+| 按日期加载 | 使用日历选择日期，扫描当天的视频和音频；视频列表显示时间和对应通道 |
+| 同步回放 | 使用统一回放时钟，按文件起始时间匹配各路视频、音频和 CAN 日志，并校正媒体播放偏差 |
+| 播放控制 | 播放、暂停；前后跳转 1、5、15、30 秒 |
+| 倍速 | 0.01、0.05、0.1、0.25、0.5、1.0、1.5、2.0 倍；实际音视频效果取决于媒体后端 |
+| 全天时间轴 | 显示所选日期的 0～24 点，单击定位，鼠标悬停查看时间 |
+| CAN 信号表 | 显示时间、中文信号名、数值及信号来源、单位；内置 132 条信号映射定义 |
+| CAN 原始表 | 显示原始时间戳、CAN ID、十六进制字节 |
+| 原始帧检查 | 查看当前位置前后各 500 ms 的记录，按 CAN ID 筛选，展开原始数据与解析详情 |
+| 毫秒级定位 | 原始帧窗口提供前后 100、200、300 ms 跳转，可双击记录定位 |
+| 独立音频 | 加载音频目录，跟随时间轴播放、暂停、跳转及变速 |
+| 界面调整 | 可调整分栏宽度、表格列宽，也可隐藏或显示右侧 CAN 面板 |
 
-```powershell
-cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="D:/Qt/6.7.2/mingw_64"
-cmake --build build/release --parallel 4
+**音频说明：视频自带的音轨默认静音，声音由单独选择的音频文件夹提供。** 当前没有视频音量调节界面。
+
+时间轴上的亮色短段是视频起始位置标记：每个文件按起点标记约 3 秒，**并不表示该视频的真实完整时长**。软件不是剪辑工具，当前没有视频导出、录屏或 DBC 文件导入功能。
+
+## 2. 开发环境与版本
+
+以下版本来自本项目实际使用的工具链，而非最低版本要求。
+
+| 项目 | 当前使用版本 / 配置 | 本机位置 |
+| --- | --- | --- |
+| 目标平台 | Windows x64，发布使用目标为 Windows 10/11 64 位 | — |
+| Qt | **6.7.2，MinGW 64 位套件** | `D:\software\QT\6.7.2\mingw_64` |
+| C++ 编译器 | **MinGW-w64 GCC 11.2.0，x86_64 / POSIX / SEH** | `D:\software\QT\Tools\mingw1120_64\bin` |
+| CMake | **3.29.3** | `D:\software\QT\Tools\CMake_64\bin` |
+| Ninja | **1.12.0** | `D:\software\QT\Tools\Ninja` |
+| C++ 标准 | C++17 | 由 `CMakeLists.txt` 设置 |
+| Qt 模块 | Widgets、Multimedia、MultimediaWidgets、Concurrent | 需安装在同一个 Qt 套件中 |
+| 构建模式 | Release | Windows 图形程序，无控制台窗口 |
+| IDE | 可使用 Qt Creator 打开 CMake 工程 | IDE 的具体版本未核实，不影响命令行构建 |
+
+请保持 Qt 和编译器的架构、ABI 一致，不要混用 MinGW Qt 库与 MSVC 编译器。
+虽然 CMake 文件保留了 Qt5 分支，当前代码使用了 Qt6 的媒体和鼠标事件接口，**请按 Qt 6.7.2 构建，不将 Qt5 视为已支持环境**。
+
+## 3. 普通用户运行方法
+
+### 3.1 已取得单文件 Windows Release
+
+双击 `DataReplay-Windows-x64.exe` 即可启动，无需安装 Qt、MinGW 或 Qt Creator。
+该发布文件内置应用与运行库，使用 Windows 的 .NET Framework 4.x 启动器；首次启动会将文件释放到：
+
+```text
+%LOCALAPPDATA%\DataReplay\<发布包标识>\
 ```
 
-输出程序为 `build/release/Data_replay.exe`。分发前需使用对应 Qt SDK 的
-`windeployqt --release --compiler-runtime` 部署 Qt 插件、音视频依赖及编译器运行库。
+首次打开请等待释放完成。后续启动复用缓存，不需要管理员权限。关闭程序后可以删除上述缓存，下一次启动会重新释放。
 
-Linux 版尚未构建或验证。
+单文件发布包不包含视频、音频和 CAN 日志。它也不存储在本 Git 仓库中，需单独取得。
 
-## 数据目录
+### 3.2 从源码编译得到的程序
 
-通过窗口选择视频、CAN 日志和音频文件夹，也可放到程序同级的
-`视频文件/`、`log文件/`、`音频文件/` 目录中。
+`Data_replay.exe` 是应用本体。直接拷贝这一个文件到其他电脑通常不够，需要同时分发 Qt、媒体插件和 MinGW 运行库。部署步骤见第 7 节。
 
-## 仓库范围
+应用初始窗口为 1800 × 900，最小窗口为 1400 × 700；桌面可用空间低于最小尺寸时可能显示不全。
 
-仓库保留程序源码、界面资源、CMake 配置和本说明。
-`docs/`、`packaging/`、`build/`、`release/`、`local-archive/`、
-本地参考资料、录制数据、日志和 IDE 配置均不提交 Git。
+## 4. 数据准备
+
+### 4.1 目录结构
+
+```text
+回放数据/
+├── 视频文件/
+│   ├── video0/
+│   │   ├── 2026-05-20_10-24-59-789.mp4
+│   │   └── 2026-05-20_10-25-59-789.mp4
+│   ├── video1/
+│   │   └── 2026-05-20_10-24-59-789.mp4
+│   ├── video2/
+│   └── ... video7/
+├── log文件/
+│   └── 2026-05-20_10-24-59-789.log
+└── 音频文件/
+    └── 2026-05-20_10-24-59-789.wav
+```
+
+- 选择视频目录时，应选择上面的 `视频文件`，即包含 `video0`～`video7` 的父目录，**不要选择某一个 video0 子目录**。
+- 不必准备全部 8 个通道，没有数据的通道可以省略。
+- 视频文件直接放入对应通道目录；日志、音频分别直接放入所选目录。当前不会递归扫描更深层子目录。
+- 视频识别扩展名：`.mp4`、`.avi`、`.mkv`、`.mov`、`.wmv`。
+- 音频识别扩展名：`.mp3`、`.wav`、`.flac`、`.aac`、`.m4a`、`.ogg`、`.wma`、`.opus`。
+- CAN 日志识别扩展名：`.log`。
+- 扩展名能被扫描不代表其内部编码一定能解码；实际支持取决于 Qt 媒体后端和文件内容。
+
+### 4.2 文件名与时间规则
+
+视频、音频和日志文件均使用不含扩展名的文件名作为起始时间，支持两种命名：
+
+| 命名方式 | 示例 | 含义 |
+| --- | --- | --- |
+| 日期时间格式 | `2026-05-20_10-24-59-789.mp4` | `yyyy-MM-dd_HH-mm-ss-zzz`，末尾三位为毫秒 |
+
+日志和音频只需换成 `.log`、`.wav` 等对应扩展名。文件名不要附加通道名、备注或其他前后缀，通道由目录区分。
+
+日期形式的文件名按运行电脑的本地时区解释；数字时间戳也按本地时区归入某一天。请让回放电脑时区与录制数据的时间约定一致。视频、音频、CAN 行时间戳必须使用同一时间基准；改名不会修复录制设备之间的时钟误差。
+
+日历默认选择今天。加载历史文件后，必须选择录制日期。当前视频和音频按**文件起始时间所属日期**筛选，跨午夜文件不能视为已支持跨天连续回放。
+
+### 4.3 CAN 日志内容
+
+日志按行读取。请使用 UTF-8 文本、英文逗号和方括号，并按时间先后保存记录。以下是两种当前解析器支持的示例格式，数值仅用于说明结构。
+
+**原始 CAN 字节行：**
+
+```text
+1777291427673,0x18FF481E,0,[01,02,0A,FF,00,00,00,00]
+```
+
+字段依次为：毫秒时间戳、CAN ID、可选的原始有符号 ID、字节数组。第三项示例中的 `0` 是占位值；不需要时可使用 `时间戳,CAN ID,[字节数组]`。
+
+数组中的字节按**十六进制**解释，最多读取 8 字节，可带 `0x` 前缀。因此 `10` 表示十六进制 `0x10`，不是十进制 10。
+
+**已经解析的信号值行：**
+
+```text
+time=1777291427673,can_id=0x18FF481E,raw_can_id=0,data=[1500,75,12.5,80,90,70]
+```
+
+这里的 `data` 是十进制信号值数组，不是原始字节。以上 ID 的前六项依次对应发动机转速、燃油液位百分比、车速、变矩器油温、发动机水温、变速箱油温。
+
+信号名称、单位、来源和数组索引由 `can_decoded_signal_mapping.h` 定义。信号表使用日志中的已解析数值进行映射，**不会仅凭原始字节自动套用外部 DBC 解码**。只有原始行时可以查看原始数据，但不能期待完整的中文信号值。
+
+CAN ID 支持 `0x` 十六进制或有符号十进制形式，解析时保留低 29 位作为有效 ID。日志文件名起始时间应不晚于文件中的记录时间；程序会选择起始时间不晚于目标时间的最近日志文件，再读取目标附近的数据。
+
+### 4.4 默认数据位置
+
+若不手动选择目录，可将 `视频文件`、`log文件`、`音频文件` 放到程序同级目录。
+使用单文件发布版时，是放到外层 `DataReplay-Windows-x64.exe` 旁边，而不是其自动释放的缓存目录。
+
+开发调试时，也可通过环境变量指定这三个目录的父目录：
+
+```powershell
+$env:DATA_REPLAY_HOME = 'D:\回放数据'
+& '.\build\windows-release\Data_replay.exe'
+```
+
+该变量适用于应用本体；单文件启动器会将其设置为启动器自身所在目录。手动选择的目录当前不保存为跨启动配置。
+
+## 5. 操作步骤
+
+1. 启动程序。左侧为目录、视频列表和日历，中间为视频及时间轴，右侧为 CAN 表格。
+2. 点击 **选择CAN Log文件夹**，选择直接包含 `.log` 的目录。
+3. 点击 **选择音频文件夹**，选择音频目录；没有独立音频可跳过。
+4. 在日历中选择录制日期，再点击 **选择视频文件夹**，选择包含各 `videoN` 的父目录。
+5. 等待扫描。程序会列出当天的视频起始时刻及通道，例如 `10:24:59 CH0,CH1`。扫描成功后会自动选中第一项并开始回放；选择其他列表项也会定位并开始播放，同时切到该时间点的一个可用通道单路视图。
+6. 在视频区域右键，选择 **4路视图** 或 **8路视图** 比较多个通道；在 **当前窗口显示通道** 中更换某个窗口的通道。双击可在单路和四路之间切换。
+7. 使用 **播放/暂停**、倍速下拉框、前后跳转按钮或单击全天时间轴定位。先从视频列表定位到大致时刻，再用秒级按钮微调通常更方便。
+8. 查看右侧信号表和原始表。通过最右侧 `<` / `>` 按钮隐藏或展开 CAN 面板。
+9. 精查报文时点击 **查看当前原始帧**，按下一节说明操作。
+
+当前播放按钮会检查是否已选择视频目录和 CAN 日志目录；常规使用请先设置这两者。音频目录是可选项。
+
+### 原始帧检查窗口
+
+打开窗口会暂停视频、音频和回放时钟，并禁用主窗口播放按钮。
+
+- 查看当前位置前后各 500 ms 的记录，展开父项查看原始字节及已解析的信号详情。
+- 用 **CAN ID 筛选** 下拉框显示某个 ID，或选择 **全部**。
+- 点击 `-300ms`、`-200ms`、`-100ms`、`+100ms`、`+200ms`、`+300ms` 微调时间。
+- 双击记录可跳转到对应帧时刻，跳转后保持暂停。
+- 关闭检查窗口后播放按钮恢复可用；需要继续时手动点击播放。
+
+毫秒跳转是时间轴定位步长，不表示视频具备相同精度的逐帧解码能力。
+
+## 6. 从源码构建
+
+### 6.1 Qt Creator
+
+1. 打开项目根目录的 `CMakeLists.txt`。
+2. 选择 **Desktop Qt 6.7.2 MinGW 64-bit** 套件，核对编译器为对应的 MinGW 11.2.0。
+3. 使用独立构建目录，例如 `build/qtcreator-release`。
+4. 选择 **Release** 配置，执行配置、构建，然后运行。
+5. 首次运行通过界面选择数据目录，或在运行环境中设置 `DATA_REPLAY_HOME`。
+
+`.user` 文件是本机 Qt Creator 配置，不随仓库提交；其他电脑首次打开时需要重新选择套件。
+
+### 6.2 PowerShell 命令行
+
+以下命令与当前本机安装路径一致。其他电脑请修改前两行，工具目录下应存在 `mingw1120_64`、`CMake_64` 和 `Ninja`。
+
+```powershell
+$qtRoot = 'D:\software\QT\6.7.2\mingw_64'
+$qtTools = 'D:\software\QT\Tools'
+$env:PATH = "$qtTools\mingw1120_64\bin;$qtTools\Ninja;$qtRoot\bin;" + $env:PATH
+
+& "$qtTools\CMake_64\bin\cmake.exe" -S . -B build/windows-release -G Ninja `
+    -DCMAKE_BUILD_TYPE=Release `
+    "-DCMAKE_PREFIX_PATH=$qtRoot" `
+    "-DCMAKE_CXX_COMPILER=$qtTools/mingw1120_64/bin/g++.exe"
+if ($LASTEXITCODE -ne 0) { throw 'CMake 配置失败' }
+
+& "$qtTools\CMake_64\bin\cmake.exe" --build build/windows-release --parallel 4
+if ($LASTEXITCODE -ne 0) { throw '编译失败' }
+
+& '.\build\windows-release\Data_replay.exe'
+```
+
+路径含空格时请保留引号和 PowerShell 调用运算符 `&`。切换编译器、Qt 套件或生成器时使用新的构建目录，避免复用旧缓存。
+
+## 7. Windows 分发部署
+
+本仓库不提交 `packaging/` 和 `docs/`，因此从 Git 克隆后不能依赖这两个本地目录重建单文件启动器。源码本身可以独立构建；下面给出不依赖本地打包脚本的**文件夹发布包**部署方式。
+
+先完成第 6.2 节的构建，并在同一个 PowerShell 会话执行：
+
+```powershell
+$deployDir = '.\release\windows-portable'
+New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
+Copy-Item -LiteralPath '.\build\windows-release\Data_replay.exe' -Destination $deployDir
+
+& "$qtRoot\bin\windeployqt.exe" --release --compiler-runtime --no-translations `
+    --dir $deployDir "$deployDir\Data_replay.exe"
+if ($LASTEXITCODE -ne 0) { throw 'Qt 部署失败' }
+
+foreach ($runtime in @('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')) {
+    Copy-Item -LiteralPath "$qtTools\mingw1120_64\bin\$runtime" -Destination $deployDir
+}
+
+Get-ChildItem -LiteralPath "$qtRoot\bin" -File |
+    Where-Object { $_.Name -match '^(avcodec|avformat|avutil|swresample|swscale)-.*\.dll$' } |
+    Copy-Item -Destination $deployDir
+
+@('[Paths]', 'Prefix=.') | Set-Content -LiteralPath "$deployDir\qt.conf" -Encoding ascii
+```
+
+分发整个 `windows-portable` 目录，用户双击其中的 `Data_replay.exe`。不要只取 EXE，也不要删除 `platforms`、`multimedia` 或旁边的 DLL。
+此方式生成的是文件夹发布包，不是单文件 EXE；已有的单文件发布包来自本机未纳入 Git 的打包工具。
+
+当前已验证：Windows Release 编译成功，移除开发工具路径后，单文件发布包能打开主窗口，Qt 平台插件、FFmpeg 媒体插件和编译器运行库从包内释放目录加载。该验证不等同于全部媒体格式、完整真实数据回放或所有 Windows 电脑均已测试。
+
+## 8. 常见问题
+
+| 现象 | 检查方法 |
+| --- | --- |
+| 当天没有视频 / 列表为空 | 检查日历日期、时区、文件名，以及选择的目录是否为 `video0`～`video7` 的父目录 |
+| 某个通道没有画面 | 检查对应 `videoN` 是否有当天文件，当前时刻是否落在文件实际时长内，以及媒体是否可解码 |
+| 视频有画面但无声音 | 视频音轨默认静音；选择独立音频目录，检查音频起始时间、日期、实际时长和系统音量 |
+| 提示先选择 CAN Log 文件夹 | 先设置日志目录；当前播放按钮要求同时选择视频和 CAN 目录 |
+| 没有可用 / 匹配的 CAN 日志 | 检查 `.log` 文件名能否解析，文件起始时间是否不晚于当前回放时刻 |
+| 原始数据有内容但信号表为空 | 检查是否包含已解析值行，以及 CAN ID、数组索引是否存在于内置信号映射中 |
+| 提示目标附近没有 CAN 数据 | 核对行时间戳是否为毫秒、数据是否按时间排列，以及目标时间附近是否有记录 |
+| 视频、声音和信号时间错开 | 核对各设备时钟、时区、文件名起始时间及 CAN 行时间戳；软件没有手动校准偏移的界面 |
+| 缺少 DLL / 无法初始化 Qt 平台插件 | 重新部署整个发布目录，确认 `platforms/qwindows.dll` 和匹配的 Qt、MinGW DLL 存在 |
+| CMake 找不到 Qt / Multimedia | 核对 `CMAKE_PREFIX_PATH`，确认同一个 Qt 6.7.2 套件中安装所需模块 |
+| 切换 Qt 后出现链接或缓存错误 | 使用新的构建目录，保持 Qt、编译器和目标架构一致 |
+| 检查原始帧后不能播放 | 先关闭原始帧窗口，再手动点击播放 |
+
+## 9. 工程结构与 Git 提交范围
+
+| 文件 / 目录 | 作用 | 是否提交 |
+| --- | --- | --- |
+| `main.cpp` | Qt 应用入口 | 是 |
+| `mainwindow.*` | 界面、操作交互及各模块协调 | 是 |
+| `video_player_manager.*` | 多路视频扫描、通道布局、同步播放 | 是 |
+| `audio_player_manager.*` | 独立音频加载与同步 | 是 |
+| `can_data_manager.*` | CAN 日志读取、信号和原始帧展示 | 是 |
+| `can_decoded_signal_mapping.h` | CAN ID / 数组索引到信号名称、单位及来源的映射 | 是 |
+| `replay_clock.*` | 回放时钟和倍速控制 | 是 |
+| `replay_timeline_widget.*` | 全天时间轴和鼠标定位 | 是 |
+| `simple_table_model.*` | 表格数据模型 | 是 |
+| `Data_replay_zh_CN.ts` | 翻译源文件；当前未配置完整翻译资源打包流程 | 是 |
+| `CMakeLists.txt`、`.gitignore`、`README.md` | 构建配置、忽略规则和说明 | 是 |
+
+提交前使用 `git status --short` 和 `git diff --cached --name-only` 核对清单。发布文件单独分发，不放入源码提交。
